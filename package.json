@@ -1,0 +1,91 @@
+{
+  "name": "dsh-semantic-loop",
+  "description": "Event-sourced semantic checkpoints and completion gate for DeepSeek Harness agents",
+  "version": "0.1.0",
+  "author": "LHKong7",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LHKong7/dsh-semantic-loop.git"
+  },
+  "homepage": "https://github.com/LHKong7/dsh-semantic-loop#readme",
+  "bugs": {
+    "url": "https://github.com/LHKong7/dsh-semantic-loop/issues"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "cordis.patch.yml",
+    "agent-presets",
+    "lib/types/**/*.d.ts"
+  ],
+  "keywords": [
+    "agent-loop",
+    "deepseek-harness",
+    "dsh-plugin",
+    "semantic-loop"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsdown",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build && publint",
+    "prepack": "npm run build"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml",
+      "agentPresets": "./agent-presets"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-agent": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-invariants": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-session": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
+    "@deepseek-ai/dsh-agent": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-agent-loop": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-agent-loop-testkit": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-invariants": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-session": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@types/node": "^22.20.0",
+    "publint": "^0.3.21",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}
