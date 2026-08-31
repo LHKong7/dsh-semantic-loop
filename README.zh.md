@@ -43,9 +43,11 @@ dsh --profile web
 
 首个 goal 与 plan 的 version 均为 `1`，首个 plan 的 `change_reason` 为 `initial-plan`。goal id 不变时，其 statement、constraints 与 completion-criterion definition 必须保持稳定。修改 plan graph 时，`plan.revision` 必须恰好递增一次，并给出新的具体原因。替换任务时，必须使用新的 goal id、下一个 goal version，并从 plan revision `1` 重新开始。Plan node 描述语义 operation、dependency 与 required capability，而不是具体 tool 名。插件会拒绝缺失 dependency、重复 edge、cycle、静默 goal drift 及未做版本变更的 plan 替换。Ready checkpoint 不得保留 active plan node。
 
+Plan node 还会声明稳定的 input/output artifact id。一个 goal 内的 `artifacts` 只能追加：每个不可变 version 会保留精简的 kind 与 summary、用于恢复完整 payload 的不透明 locator、content digest、producer plan node 及 revision、确切 input version 和支持它的 tool-result id。上游 replacement 会让下游 artifact 变为 stale；plan revision 会保守地让较早 revision 生成的全部 plan artifact 变为 stale。Ready checkpoint 要求每个 required plan node 都有 current output artifact。替换 goal 时不继承 artifact。
+
 `met` criterion 要求非空 evidence，`unmet` criterion 则携带空 evidence。`ready` 要求至少一个 criterion、所有 criterion 均为 `met`，且不存在 gap。每个 fact 也必须有 evidence。每个 criterion 与 fact 都有 `evidence_call_ids`：模型选择支持该 claim 的成功 environment-tool result，插件则对照更早的 Session log 验证每个 id。checkpoint 另行记录 `observedCallIds`，即当前 turn 中已经看到的全部成功 environment result。这样，无关的成功调用不会仅因发生在 checkpoint 之前就自动成为证据。
 
-该工具把 semantic-checkpoint user message 作为 result context 返回。Agent Loop 先提交 tool result，再把该 message 插入持久的 next-step inbox。其 version `5` source 保存完整规范检查点、所属 `SessionId`，以及编写该值的 `checkpointCallId`；其文本是精简的提交回执。回放要求该 id 指向更早成功的 `semantic_checkpoint` call/result，并根据持久 call argument 与调用时 observation 重新构造 checkpoint，拒绝任何差异。回放还会按 message id 去重之后出现的 `user/message`，要求 revision 连续，验证每条 claim reference，并在 fork 以新 Session id 启动时忽略继承而来的父级状态。同一 id 的 resume 会延续 revision 流。只有当 resume 或 compaction 隐藏了原始 checkpoint call 时，才使用 `semantic_state` 渲染最新完整快照；常规更新不应调用它。
+该工具把 semantic-checkpoint user message 作为 result context 返回。Agent Loop 先提交 tool result，再把该 message 插入持久的 next-step inbox。其 version `6` source 保存完整规范检查点、所属 `SessionId`，以及编写该值的 `checkpointCallId`；其文本是精简的提交回执。回放要求该 id 指向更早成功的 `semantic_checkpoint` call/result，并根据持久 call argument 与调用时 observation 重新构造 checkpoint，拒绝任何差异。回放还会按 message id 去重之后出现的 `user/message`，要求 revision 连续，验证每条 claim reference，并在 fork 以新 Session id 启动时忽略继承而来的父级状态。同一 id 的 resume 会延续 revision 流。只有当 resume 或 compaction 隐藏了原始 checkpoint call 时，才使用 `semantic_state` 渲染最新完整快照；常规更新不应调用它。
 
 ## 完成协议
 
@@ -102,6 +104,7 @@ Before semantic_finish succeeds, emit tool calls without accompanying ordinary a
 ## 已知限制与后续工作
 
 - **模型编写检查点** — 当前由 conversation model 完成 observation-to-state compilation；尚无独立 compiler model 或确定性的领域 compiler。
+- **模型编写 artifact metadata** — artifact locator 与 content digest 会接受结构验证，但尚未由独立 materializer 生成。
 - **Correlation 不等于 entailment** — gate 会验证 criterion、evidence 是否存在、gap 是否关闭及引用的成功 environment result 是否存在，但领域 verifier 仍须检查支持关系与 ground truth。
 - **Checkpoint call 仅追加增长** — 精简回执避免了第二份完整副本，但更早的 checkpoint-call argument 仍会保留，直到普通 compaction 移除其 token 成本。
 - **精确终态复述** — 修复前可能已经记录普通 assistant text 作为临时输出；有效产品 completion 必须是最新 finish 批准后的第一条普通 assistant message，并且完全复述该 answer。

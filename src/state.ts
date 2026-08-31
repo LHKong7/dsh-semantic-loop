@@ -4,11 +4,14 @@ import { isDeepStrictEqual } from 'node:util'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CallId, type MessageId, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { assertSemanticArtifacts, assertSemanticArtifactTransition } from './artifacts.ts'
 import { assertSemanticGoal, assertSemanticPlan, assertSemanticTransition } from './plan.ts'
 import { CHECKPOINT_TOOL, isSemanticToolName } from './protocol.ts'
 import type {
   SemanticCheckpoint,
   SemanticCheckpointSource,
+  SemanticArtifact,
+  SemanticArtifactRef,
   SemanticCriterion,
   SemanticFact,
   SemanticGap,
@@ -117,6 +120,58 @@ function decodeGap(value: unknown, index: number): SemanticGap {
   }
 }
 
+/** Decode one persisted artifact reference. */
+function decodeArtifactRef(value: unknown, index: number): SemanticArtifactRef {
+  const label = `semantic artifact reference ${index}`
+  const record = exactRecord(value, ['id', 'version'], label)
+  const version = record['version']
+  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
+    throw new Error(`${label} version must be a positive safe integer`)
+  }
+  return { id: checkpointId(record['id'], `${label} id`), version }
+}
+
+/** Decode one persisted semantic artifact. */
+function decodeArtifact(value: unknown, index: number): SemanticArtifact {
+  const label = `semantic artifact ${index}`
+  const record = exactRecord(
+    value,
+    [
+      'id', 'version', 'kind', 'summary', 'locator', 'contentDigest', 'producerNodeId', 'planRevision',
+      'inputs', 'evidenceCallIds',
+    ],
+    label,
+  )
+  const version = record['version']
+  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
+    throw new Error(`${label} version must be a positive safe integer`)
+  }
+  const producerNodeId = record['producerNodeId']
+  if (producerNodeId !== null && typeof producerNodeId !== 'string') {
+    throw new Error(`${label} producerNodeId must be a string or null`)
+  }
+  const planRevision = record['planRevision']
+  if (typeof planRevision !== 'number' || !Number.isSafeInteger(planRevision) || planRevision < 0) {
+    throw new Error(`${label} planRevision must be a non-negative safe integer`)
+  }
+  return {
+    id: checkpointId(record['id'], `${label} id`),
+    version,
+    kind: requiredText(record['kind'], `${label} kind`),
+    summary: requiredText(record['summary'], `${label} summary`),
+    locator: requiredText(record['locator'], `${label} locator`),
+    contentDigest: requiredText(record['contentDigest'], `${label} contentDigest`),
+    producerNodeId: producerNodeId === null ? null : checkpointId(producerNodeId, `${label} producerNodeId`),
+    planRevision,
+    inputs: decodeArray(record['inputs'], `${label} inputs`, decodeArtifactRef),
+    evidenceCallIds: decodeArray(
+      record['evidenceCallIds'],
+      `${label} evidence call ids`,
+      (item, callIndex) => decodeCallId(item, callIndex),
+    ),
+  }
+}
+
 /** Decode one persisted stable goal contract. */
 function decodeGoal(value: unknown): SemanticGoal {
   const record = exactRecord(value, ['id', 'version', 'statement', 'constraints'], 'semantic goal')
@@ -143,7 +198,10 @@ function decodePlanNode(value: unknown, index: number): SemanticPlanNode {
   const label = `semantic plan node ${index}`
   const record = exactRecord(
     value,
-    ['id', 'operation', 'description', 'dependsOn', 'requiredCapabilities'],
+    [
+      'id', 'operation', 'description', 'dependsOn', 'inputArtifactIds', 'outputArtifactId',
+      'requiredCapabilities', 'required',
+    ],
     label,
   )
   return {
@@ -155,11 +213,21 @@ function decodePlanNode(value: unknown, index: number): SemanticPlanNode {
       `${label} dependencies`,
       (item, dependencyIndex) => checkpointId(item, `${label} dependency ${dependencyIndex}`),
     ),
+    inputArtifactIds: decodeArray(
+      record['inputArtifactIds'],
+      `${label} input artifact ids`,
+      (item, inputIndex) => checkpointId(item, `${label} input artifact id ${inputIndex}`),
+    ),
+    outputArtifactId: checkpointId(record['outputArtifactId'], `${label} output artifact id`),
     requiredCapabilities: decodeArray(
       record['requiredCapabilities'],
       `${label} required capabilities`,
       (item, capabilityIndex) => requiredText(item, `${label} required capability ${capabilityIndex}`),
     ),
+    required: (() => {
+      if (typeof record['required'] !== 'boolean') throw new Error(`${label} required must be a boolean`)
+      return record['required']
+    })(),
   }
 }
 
@@ -183,7 +251,7 @@ function decodePlan(value: unknown): SemanticPlan {
 function decodeCheckpoint(value: unknown): SemanticCheckpoint {
   const record = exactRecord(
     value,
-    ['goal', 'criteria', 'plan', 'activeNodeId', 'facts', 'observedCallIds', 'gaps', 'nextAction', 'status'],
+    ['goal', 'criteria', 'plan', 'activeNodeId', 'artifacts', 'facts', 'observedCallIds', 'gaps', 'nextAction', 'status'],
     'semantic checkpoint',
   )
   const status = record['status']
@@ -199,6 +267,7 @@ function decodeCheckpoint(value: unknown): SemanticCheckpoint {
     criteria: decodeArray(record['criteria'], 'semantic criteria', decodeCriterion),
     plan: decodePlan(record['plan']),
     activeNodeId: activeNodeId === null ? null : checkpointId(activeNodeId, 'semantic checkpoint activeNodeId'),
+    artifacts: decodeArray(record['artifacts'], 'semantic artifacts', decodeArtifact),
     facts: decodeArray(record['facts'], 'semantic facts', decodeFact),
     observedCallIds: decodeArray(record['observedCallIds'], 'semantic observed call ids', decodeCallId),
     gaps: decodeArray(record['gaps'], 'semantic gaps', decodeGap),
@@ -206,6 +275,7 @@ function decodeCheckpoint(value: unknown): SemanticCheckpoint {
     status,
   }
   assertCheckpointRelations(checkpoint)
+  assertSemanticArtifacts(checkpoint)
   return checkpoint
 }
 
@@ -221,6 +291,10 @@ export interface SemanticCheckpointInput {
   readonly plan: SemanticPlan
   /** Plan node selected for the next action, or `null` when none is active. */
   readonly activeNodeId: string | null
+  /** Append-only semantic intermediate results. */
+  readonly artifacts: readonly (Omit<SemanticArtifact, 'evidenceCallIds'> & {
+    readonly evidenceCallIds: readonly string[]
+  })[]
   /** Evidence-backed facts retained for later decisions. */
   readonly facts: readonly (Omit<SemanticFact, 'evidenceCallIds'> & {
     readonly evidenceCallIds: readonly string[]
@@ -290,6 +364,52 @@ function decodeCallGap(value: unknown, index: number): SemanticGap {
   }
 }
 
+/** Decode one artifact reference from durable model tool arguments. */
+function decodeCallArtifactRef(value: unknown, index: number): SemanticArtifactRef {
+  const label = `semantic checkpoint call artifact reference ${index}`
+  const record = exactRecord(value, ['id', 'version'], label)
+  const version = record['version']
+  if (typeof version !== 'number') throw new Error(`${label} version must be a number`)
+  return { id: modelString(record['id'], `${label} id`), version }
+}
+
+/** Decode one artifact from durable model tool arguments. */
+function decodeCallArtifact(value: unknown, index: number): SemanticCheckpointInput['artifacts'][number] {
+  const label = `semantic checkpoint call artifact ${index}`
+  const record = exactRecord(
+    value,
+    [
+      'id', 'version', 'kind', 'summary', 'locator', 'content_digest', 'producer_node_id', 'plan_revision',
+      'inputs', 'evidence_call_ids',
+    ],
+    label,
+  )
+  const version = record['version']
+  if (typeof version !== 'number') throw new Error(`${label} version must be a number`)
+  const producerNodeId = record['producer_node_id']
+  if (producerNodeId !== null && typeof producerNodeId !== 'string') {
+    throw new Error(`${label} producer_node_id must be a string or null`)
+  }
+  const planRevision = record['plan_revision']
+  if (typeof planRevision !== 'number') throw new Error(`${label} plan_revision must be a number`)
+  return {
+    id: modelString(record['id'], `${label} id`),
+    version,
+    kind: modelString(record['kind'], `${label} kind`),
+    summary: modelString(record['summary'], `${label} summary`),
+    locator: modelString(record['locator'], `${label} locator`),
+    contentDigest: modelString(record['content_digest'], `${label} content digest`),
+    producerNodeId,
+    planRevision,
+    inputs: decodeArray(record['inputs'], `${label} inputs`, decodeCallArtifactRef),
+    evidenceCallIds: decodeArray(
+      record['evidence_call_ids'],
+      `${label} evidence call ids`,
+      (item, callIndex) => modelString(item, `${label} evidence call id ${callIndex}`),
+    ),
+  }
+}
+
 /** Decode one goal contract from durable model tool arguments. */
 function decodeCallGoal(value: unknown): SemanticGoal {
   const record = exactRecord(value, ['id', 'version', 'statement', 'constraints'], 'semantic checkpoint call goal')
@@ -312,7 +432,10 @@ function decodeCallPlanNode(value: unknown, index: number): SemanticPlanNode {
   const label = `semantic checkpoint call plan node ${index}`
   const record = exactRecord(
     value,
-    ['id', 'operation', 'description', 'depends_on', 'required_capabilities'],
+    [
+      'id', 'operation', 'description', 'depends_on', 'input_artifact_ids', 'output_artifact_id',
+      'required_capabilities', 'required',
+    ],
     label,
   )
   return {
@@ -324,11 +447,21 @@ function decodeCallPlanNode(value: unknown, index: number): SemanticPlanNode {
       `${label} dependencies`,
       (item, dependencyIndex) => modelString(item, `${label} dependency ${dependencyIndex}`),
     ),
+    inputArtifactIds: decodeArray(
+      record['input_artifact_ids'],
+      `${label} input artifact ids`,
+      (item, inputIndex) => modelString(item, `${label} input artifact id ${inputIndex}`),
+    ),
+    outputArtifactId: modelString(record['output_artifact_id'], `${label} output artifact id`),
     requiredCapabilities: decodeArray(
       record['required_capabilities'],
       `${label} required capabilities`,
       (item, capabilityIndex) => modelString(item, `${label} required capability ${capabilityIndex}`),
     ),
+    required: (() => {
+      if (typeof record['required'] !== 'boolean') throw new Error(`${label} required must be a boolean`)
+      return record['required']
+    })(),
   }
 }
 
@@ -354,7 +487,10 @@ function decodeCheckpointCallArguments(raw: string): SemanticCheckpointCallArgum
   }
   const record = exactRecord(
     value,
-    ['expected_revision', 'goal', 'criteria', 'plan', 'active_node_id', 'facts', 'gaps', 'next_action', 'status'],
+    [
+      'expected_revision', 'goal', 'criteria', 'plan', 'active_node_id', 'artifacts', 'facts', 'gaps',
+      'next_action', 'status',
+    ],
     'semantic checkpoint call arguments',
   )
   const expectedRevision = record['expected_revision']
@@ -376,6 +512,7 @@ function decodeCheckpointCallArguments(raw: string): SemanticCheckpointCallArgum
       criteria: decodeArray(record['criteria'], 'semantic checkpoint call criteria', decodeCallCriterion),
       plan: decodeCallPlan(record['plan']),
       activeNodeId,
+      artifacts: decodeArray(record['artifacts'], 'semantic checkpoint call artifacts', decodeCallArtifact),
       facts: decodeArray(record['facts'], 'semantic checkpoint call facts', decodeCallFact),
       gaps: decodeArray(record['gaps'], 'semantic checkpoint call gaps', decodeCallGap),
       nextAction: modelString(record['next_action'], 'semantic checkpoint call next_action'),
@@ -422,6 +559,9 @@ function assertCheckpointRelations(checkpoint: SemanticCheckpoint): void {
   for (const fact of checkpoint.facts) {
     assertUniqueCallIds(`fact "${fact.id}" evidence`, fact.evidenceCallIds)
   }
+  for (const artifact of checkpoint.artifacts) {
+    assertUniqueCallIds(`artifact "${artifact.id}@${artifact.version}" evidence`, artifact.evidenceCallIds)
+  }
   if (checkpoint.status === 'ready') {
     if (checkpoint.criteria.length === 0) {
       throw new Error('ready semantic checkpoint requires at least one completion criterion')
@@ -444,7 +584,7 @@ function assertEvidenceReferences(
   checkpoint: SemanticCheckpoint,
   availableCallIds: ReadonlySet<CallId>,
 ): void {
-  for (const item of [...checkpoint.criteria, ...checkpoint.facts]) {
+  for (const item of [...checkpoint.criteria, ...checkpoint.facts, ...checkpoint.artifacts]) {
     for (const callId of item.evidenceCallIds) {
       if (!availableCallIds.has(callId)) {
         throw new Error(`semantic checkpoint ${item.id} evidence call id "${callId}" is not an earlier successful environment-tool result`)
@@ -488,10 +628,25 @@ export function resolveSemanticCheckpoint(
         operation: node.operation.trim(),
         description: node.description.trim(),
         dependsOn: node.dependsOn.map(value => value.trim()),
+        inputArtifactIds: node.inputArtifactIds.map(value => value.trim()),
+        outputArtifactId: node.outputArtifactId.trim(),
         requiredCapabilities: node.requiredCapabilities.map(value => value.trim()),
+        required: node.required,
       })),
     },
     activeNodeId: input.activeNodeId === null ? null : input.activeNodeId.trim(),
+    artifacts: input.artifacts.map(artifact => ({
+      id: artifact.id.trim(),
+      version: artifact.version,
+      kind: artifact.kind.trim(),
+      summary: artifact.summary.trim(),
+      locator: artifact.locator.trim(),
+      contentDigest: artifact.contentDigest.trim(),
+      producerNodeId: artifact.producerNodeId === null ? null : artifact.producerNodeId.trim(),
+      planRevision: artifact.planRevision,
+      inputs: artifact.inputs.map(input => ({ id: input.id.trim(), version: input.version })),
+      evidenceCallIds: artifact.evidenceCallIds.map(value => CallId(value)),
+    })),
     facts: input.facts.map(fact => ({
       id: fact.id.trim(),
       statement: fact.statement.trim(),
@@ -521,6 +676,7 @@ export function semanticEvidenceCallIds(checkpoint: SemanticCheckpoint): readonl
   return [...new Set([
     ...checkpoint.criteria.flatMap(criterion => criterion.evidenceCallIds),
     ...checkpoint.facts.flatMap(fact => fact.evidenceCallIds),
+    ...checkpoint.artifacts.flatMap(artifact => artifact.evidenceCallIds),
   ])]
 }
 
@@ -537,7 +693,7 @@ export function decodeSemanticCheckpointSource(source: unknown): SemanticCheckpo
     'semantic checkpoint source',
   )
   if (record['kind'] !== 'semantic-checkpoint') throw new Error('semantic checkpoint source has an invalid kind')
-  if (record['version'] !== 5) throw new Error('semantic checkpoint source has an unsupported version')
+  if (record['version'] !== 6) throw new Error('semantic checkpoint source has an unsupported version')
   const sessionId = record['sessionId']
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
     throw new Error('semantic checkpoint source sessionId must be non-empty')
@@ -552,7 +708,7 @@ export function decodeSemanticCheckpointSource(source: unknown): SemanticCheckpo
   }
   return {
     kind: 'semantic-checkpoint',
-    version: 5,
+    version: 6,
     sessionId: SessionId(sessionId),
     checkpointCallId: CallId(checkpointCallId),
     revision,
@@ -604,7 +760,15 @@ export function renderSemanticCheckpoint(state: SemanticState): string {
         ? ''
         : `; capabilities: ${node.requiredCapabilities.join(', ')}`
       const active = checkpoint.activeNodeId === node.id ? ' [active]' : ''
-      return `- ${node.id}${active}: ${node.operation} (${dependencies}${capabilities}) — ${node.description}`
+      const inputs = node.inputArtifactIds.length === 0 ? 'no inputs' : `inputs: ${node.inputArtifactIds.join(', ')}`
+      return `- ${node.id}${active}: ${node.operation} (${dependencies}; ${inputs}; output: ${node.outputArtifactId}${capabilities}) — ${node.description}`
+    }).join('\n')
+  const artifacts = checkpoint.artifacts.length === 0
+    ? '- (none yet)'
+    : checkpoint.artifacts.map((artifact) => {
+      const producer = artifact.producerNodeId === null ? 'external' : `${artifact.producerNodeId}@p${artifact.planRevision}`
+      const inputs = artifact.inputs.length === 0 ? '' : `; inputs: ${artifact.inputs.map(input => `${input.id}@${input.version}`).join(', ')}`
+      return `- ${artifact.id}@${artifact.version}: ${artifact.kind} — ${artifact.summary} (${producer}; ${artifact.locator}; digest: ${artifact.contentDigest}${inputs})`
     }).join('\n')
   return `Semantic state r${revision}. This whole snapshot supersedes every earlier semantic-state snapshot.
 
@@ -614,6 +778,9 @@ Status: ${checkpoint.status}
 
 Plan p${checkpoint.plan.revision} (${checkpoint.plan.changeReason}):
 ${plan}
+
+Semantic artifacts:
+${artifacts}
 
 Completion criteria:
 ${criteria}
@@ -643,7 +810,7 @@ Next action: ${checkpoint.nextAction}`
 export function renderSemanticCheckpointReceipt(state: SemanticState): string {
   const { revision, checkpoint } = state
   const unmet = checkpoint.criteria.filter(criterion => criterion.status === 'unmet').length
-  return `Semantic state r${revision} committed (goal ${checkpoint.goal.id}@${checkpoint.goal.version}; plan p${checkpoint.plan.revision}; ${checkpoint.status}; ${checkpoint.gaps.length} open gaps; ${unmet} unmet criteria). The complete state is stored in the Session log. Call semantic_state only to recover it after resume or compaction.`
+  return `Semantic state r${revision} committed (goal ${checkpoint.goal.id}@${checkpoint.goal.version}; plan p${checkpoint.plan.revision}; ${checkpoint.artifacts.length} artifacts; ${checkpoint.status}; ${checkpoint.gaps.length} open gaps; ${unmet} unmet criteria). The complete state is stored in the Session log. Call semantic_state only to recover it after resume or compaction.`
 }
 
 /** Replay state used to enforce message identity and revision relations. */
@@ -725,6 +892,7 @@ function applySemanticMessage(state: SemanticFoldState, message: UserMessage): v
   }
   assertEvidenceReferences(source.checkpoint, state.successfulCallIds)
   assertSemanticTransition(state.latest.get(source.sessionId)?.checkpoint, source.checkpoint)
+  assertSemanticArtifactTransition(state.latest.get(source.sessionId)?.checkpoint, source.checkpoint)
   let revisions = state.revisions.get(source.sessionId)
   if (revisions === undefined) {
     revisions = new Map()

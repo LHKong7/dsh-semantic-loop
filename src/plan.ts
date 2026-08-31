@@ -30,12 +30,22 @@ export function assertSemanticPlan(plan: SemanticPlan): void {
     throw new Error('semantic plan revision must be a positive safe integer')
   }
   const nodes = new Map<string, SemanticPlanNode>()
+  const outputs = new Set<string>()
   for (const node of plan.nodes) {
     assertSemanticId(node.id, 'semantic plan node id')
     if (nodes.has(node.id)) throw new Error(`semantic plan repeats node id "${node.id}"`)
     assertUniqueStrings(node.dependsOn, `semantic plan node "${node.id}" dependencies`)
+    assertUniqueStrings(node.inputArtifactIds, `semantic plan node "${node.id}" input artifacts`)
     assertUniqueStrings(node.requiredCapabilities, `semantic plan node "${node.id}" required capabilities`)
+    assertSemanticId(node.outputArtifactId, `semantic plan node "${node.id}" output artifact id`)
+    for (const inputId of node.inputArtifactIds) {
+      assertSemanticId(inputId, `semantic plan node "${node.id}" input artifact id`)
+    }
+    if (outputs.has(node.outputArtifactId)) {
+      throw new Error(`semantic plan repeats output artifact id "${node.outputArtifactId}"`)
+    }
     nodes.set(node.id, node)
+    outputs.add(node.outputArtifactId)
   }
   for (const node of plan.nodes) {
     for (const dependency of node.dependsOn) {
@@ -43,6 +53,16 @@ export function assertSemanticPlan(plan: SemanticPlan): void {
         throw new Error(`semantic plan node "${node.id}" depends on missing node "${dependency}"`)
       }
       if (dependency === node.id) throw new Error(`semantic plan node "${node.id}" depends on itself`)
+      const dependencyOutput = nodes.get(dependency)?.outputArtifactId
+      if (dependencyOutput !== undefined && !node.inputArtifactIds.includes(dependencyOutput)) {
+        throw new Error(`semantic plan node "${node.id}" does not consume dependency "${dependency}" output "${dependencyOutput}"`)
+      }
+    }
+    for (const inputId of node.inputArtifactIds) {
+      const producer = plan.nodes.find(candidate => candidate.outputArtifactId === inputId)
+      if (producer !== undefined && !node.dependsOn.includes(producer.id)) {
+        throw new Error(`semantic plan node "${node.id}" consumes "${inputId}" without depending on producer "${producer.id}"`)
+      }
     }
   }
 

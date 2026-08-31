@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { CallId, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SemanticCheckpoint } from '../src/types.ts'
+import {
+  assertSemanticArtifacts,
+  assertSemanticArtifactTransition,
+  semanticArtifactStatus,
+} from '../src/artifacts.ts'
 import { assertSemanticTransition } from '../src/plan.ts'
 import {
   decodeSemanticCheckpointSource,
@@ -36,10 +41,25 @@ const ready: SemanticCheckpoint = {
       operation: 'query-structured-source',
       description: 'Query the source needed to answer the question',
       dependsOn: [],
+      inputArtifactIds: [],
+      outputArtifactId: 'query-result',
       requiredCapabilities: ['structured-query'],
+      required: true,
     }],
   },
   activeNodeId: null,
+  artifacts: [{
+    id: 'query-result',
+    version: 1,
+    kind: 'query-result',
+    summary: 'The query result is 42',
+    locator: 'semantic://query-result/1',
+    contentDigest: 'answer-42',
+    producerNodeId: 'query-answer',
+    planRevision: 1,
+    inputs: [],
+    evidenceCallIds: [],
+  }],
   facts: [{ id: 'query-result', statement: 'The result is 42', evidence: 'query q1 row 1', evidenceCallIds: [] }],
   observedCallIds: [],
   gaps: [],
@@ -52,7 +72,7 @@ const OWNER = SessionId('semantic-owner')
 function checkpointSource(checkpoint: unknown = ready, overrides: Record<string, unknown> = {}): unknown {
   return {
     kind: 'semantic-checkpoint',
-    version: 5,
+    version: 6,
     sessionId: OWNER,
     checkpointCallId: CallId('semantic-checkpoint-1'),
     revision: 1,
@@ -80,10 +100,25 @@ function checkpointArguments(revision: number, checkpoint: SemanticCheckpoint): 
         operation: node.operation,
         description: node.description,
         depends_on: node.dependsOn,
+        input_artifact_ids: node.inputArtifactIds,
+        output_artifact_id: node.outputArtifactId,
         required_capabilities: node.requiredCapabilities,
+        required: node.required,
       })),
     },
     active_node_id: checkpoint.activeNodeId,
+    artifacts: checkpoint.artifacts.map(artifact => ({
+      id: artifact.id,
+      version: artifact.version,
+      kind: artifact.kind,
+      summary: artifact.summary,
+      locator: artifact.locator,
+      content_digest: artifact.contentDigest,
+      producer_node_id: artifact.producerNodeId,
+      plan_revision: artifact.planRevision,
+      inputs: artifact.inputs,
+      evidence_call_ids: artifact.evidenceCallIds,
+    })),
     facts: checkpoint.facts.map(fact => ({
       id: fact.id,
       statement: fact.statement,
@@ -104,7 +139,7 @@ function checkpointEvent(
 ): SessionEvent {
   const state = { revision, checkpoint }
   const message = createUserMessage({
-    source: { kind: 'semantic-checkpoint', version: 5, sessionId: OWNER, checkpointCallId: callId, revision, checkpoint },
+    source: { kind: 'semantic-checkpoint', version: 6, sessionId: OWNER, checkpointCallId: callId, revision, checkpoint },
     content: [{ type: 'text', text: renderSemanticCheckpointReceipt(state) }],
   })
   return {
@@ -165,13 +200,16 @@ describe('semantic checkpoint state', () => {
       plan: {
         ...ready.plan,
         nodes: [
-          { ...ready.plan.nodes[0]!, dependsOn: ['format-answer'] },
+          { ...ready.plan.nodes[0]!, dependsOn: ['format-answer'], inputArtifactIds: ['formatted-answer'] },
           {
             id: 'format-answer',
             operation: 'format-answer',
             description: 'Format the answer',
             dependsOn: ['query-answer'],
+            inputArtifactIds: ['query-result'],
+            outputArtifactId: 'formatted-answer',
             requiredCapabilities: [],
+            required: true,
           },
         ],
       },
@@ -193,7 +231,10 @@ describe('semantic checkpoint state', () => {
             operation: 'validate-result',
             description: 'Validate the query result',
             dependsOn: ['query-answer'],
+            inputArtifactIds: ['query-result'],
+            outputArtifactId: 'validated-answer',
             requiredCapabilities: ['result-validation'],
+            required: true,
           },
         ],
       },
@@ -213,12 +254,79 @@ describe('semantic checkpoint state', () => {
     })).toThrow(/changed its completion criteria/)
   })
 
+  it('invalidates downstream artifacts after an upstream replacement or plan revision', () => {
+    const aggregateNode = {
+      id: 'aggregate-answer',
+      operation: 'aggregate-values',
+      description: 'Aggregate the query result',
+      dependsOn: ['query-answer'],
+      inputArtifactIds: ['query-result'],
+      outputArtifactId: 'final-answer',
+      requiredCapabilities: ['aggregation'],
+      required: true,
+    }
+    const aggregateArtifact = {
+      id: 'final-answer',
+      version: 1,
+      kind: 'answer-value',
+      summary: 'The aggregate is 42',
+      locator: 'semantic://final-answer/1',
+      contentDigest: 'aggregate-42',
+      producerNodeId: 'aggregate-answer',
+      planRevision: 1,
+      inputs: [{ id: 'query-result', version: 1 }],
+      evidenceCallIds: [],
+    }
+    const pipeline: SemanticCheckpoint = {
+      ...ready,
+      plan: { ...ready.plan, nodes: [...ready.plan.nodes, aggregateNode] },
+      artifacts: [...ready.artifacts, aggregateArtifact],
+    }
+    expect(() => assertSemanticArtifacts(pipeline)).not.toThrow()
+    expect(semanticArtifactStatus(pipeline, aggregateArtifact)).toBe('current')
+
+    const upstreamReplacement = {
+      ...ready.artifacts[0]!,
+      version: 2,
+      summary: 'The corrected query result is 43',
+      locator: 'semantic://query-result/2',
+      contentDigest: 'answer-43',
+    }
+    const stalePipeline: SemanticCheckpoint = {
+      ...pipeline,
+      status: 'exploring',
+      activeNodeId: 'aggregate-answer',
+      artifacts: [...pipeline.artifacts, upstreamReplacement],
+    }
+    expect(semanticArtifactStatus(stalePipeline, aggregateArtifact)).toBe('stale')
+    expect(() => assertSemanticArtifacts({
+      ...stalePipeline,
+      status: 'ready',
+      activeNodeId: null,
+    })).toThrow(/lacks current artifacts.*aggregate-answer/)
+    expect(() => assertSemanticArtifactTransition(pipeline, stalePipeline)).not.toThrow()
+    expect(() => assertSemanticArtifactTransition(pipeline, {
+      ...pipeline,
+      artifacts: pipeline.artifacts.slice(1),
+    })).toThrow(/history is append-only/)
+
+    const revisedPlan: SemanticCheckpoint = {
+      ...pipeline,
+      status: 'exploring',
+      activeNodeId: 'query-answer',
+      plan: { ...pipeline.plan, revision: 2, changeReason: 'correct the query semantics' },
+    }
+    expect(semanticArtifactStatus(revisedPlan, ready.artifacts[0]!)).toBe('stale')
+    expect(semanticArtifactStatus(revisedPlan, aggregateArtifact)).toBe('stale')
+  })
+
   it('canonicalizes model input and renders a whole superseding snapshot', () => {
     const checkpoint = resolveSemanticCheckpoint({
       goal: { ...ready.goal, statement: '  Answer the database question  ' },
       criteria: [{ ...ready.criteria[0]!, description: '  The answer follows from query output  ' }],
       plan: ready.plan,
       activeNodeId: ready.activeNodeId,
+      artifacts: ready.artifacts,
       facts: [{ ...ready.facts[0]!, evidence: '  query q1 row 1  ' }],
       gaps: [],
       nextAction: '  Call semantic_finish with the supported answer  ',
@@ -236,6 +344,7 @@ describe('semantic checkpoint state', () => {
       criteria: [],
       plan: { revision: 1, changeReason: 'initial-plan', nodes: [] },
       activeNodeId: null,
+      artifacts: [],
       facts: [],
       observedCallIds: [],
       gaps: [],
@@ -272,7 +381,7 @@ describe('semantic checkpoint state', () => {
     [null, /must be an object/],
     [[], /must be an object/],
     [{ ...checkpointSource() as object, extra: true }, /fields must be exactly/],
-    [{ kind: 'semantic-checkpoint', version: 5, sessionId: OWNER, revision: 1 }, /fields must be exactly/],
+    [{ kind: 'semantic-checkpoint', version: 6, sessionId: OWNER, revision: 1 }, /fields must be exactly/],
     [checkpointSource(ready, { kind: 'other' }), /invalid kind/],
     [checkpointSource(ready, { version: 3 }), /unsupported version/],
     [checkpointSource(ready, { sessionId: '' }), /sessionId must be non-empty/],
@@ -359,7 +468,7 @@ describe('semantic checkpoint state', () => {
     const changedMessage = createUserMessage({
       source: {
         kind: 'semantic-checkpoint',
-        version: 5,
+        version: 6,
         sessionId: OWNER,
         checkpointCallId: CallId('semantic-checkpoint-1'),
         revision: 1,
