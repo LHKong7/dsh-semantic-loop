@@ -1,7 +1,11 @@
-# The invariant is host-owned: it validates semantic messages regardless of
-# which agent preset produced them. The semantic protocol itself stays inside
-# the packaged `semantic` preset so installing this bundle does not change
-# Standard, Code, Minimal, or user-authored modes.
+# The registry and companion are host-owned: they validate semantic messages
+# regardless of which agent preset produced them. Shipped DSH profiles omit the
+# optional diagnostics registry, so this standalone Bundle supplies the service
+# required by its companion. The semantic protocol itself stays inside the
+# packaged `semantic` preset, leaving every other mode unchanged.
 - insert:
+    - id: semantic-loop-invariants
+      name: '@deepseek-ai/dsh-invariants'
+
     - id: semantic-loop-invariant
       name: 'dsh-semantic-loop/invariant'

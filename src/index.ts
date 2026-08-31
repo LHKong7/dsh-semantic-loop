@@ -23,6 +23,7 @@ import {
   STATE_TOOL,
   VERIFY_TOOL,
   currentTurnObservedCallIds,
+  isSemanticToolName,
   latestEnvironmentResultSeq,
   latestTurnStartSeq,
   successfulEnvironmentCallIds,
@@ -103,6 +104,7 @@ export const inject = ['agents', 'tools', 'systemPrompt']
 const DEFAULT_MAX_REPAIR_STEPS = 3
 const DEFAULT_MAX_CHECKPOINT_BYTES = 65_536
 const DEFAULT_MAX_STAGNANT_REVISIONS = 3
+const DEFAULT_MAX_PROTOCOL_FAILURES = 5
 
 /** Runtime policy for refusal-to-follow-protocol repair. */
 export interface Config {
@@ -112,6 +114,8 @@ export interface Config {
   readonly maxCheckpointBytes?: number
   /** Maximum consecutive accepted checkpoint revisions without material semantic progress. */
   readonly maxStagnantRevisions?: number
+  /** Maximum failed top-level semantic-protocol calls in one turn before cancellation. */
+  readonly maxProtocolFailures?: number
   /** Require a ready checkpoint to cite at least one successful environment-tool result from the current turn. */
   readonly requireToolEvidence?: boolean
   /** Deployment-declared semantic capabilities available to this preset. */
@@ -123,6 +127,7 @@ export const Config: z<Config> = z.object({
   maxRepairSteps: z.number().step(1).min(1).default(DEFAULT_MAX_REPAIR_STEPS),
   maxCheckpointBytes: z.number().step(1).min(1).default(DEFAULT_MAX_CHECKPOINT_BYTES),
   maxStagnantRevisions: z.number().step(1).min(0).default(DEFAULT_MAX_STAGNANT_REVISIONS),
+  maxProtocolFailures: z.number().step(1).min(1).default(DEFAULT_MAX_PROTOCOL_FAILURES),
   requireToolEvidence: z.boolean().default(false),
   capabilities: z.array(z.object({
     id: z.string(),
@@ -135,6 +140,7 @@ interface ResolvedConfig {
   readonly maxRepairSteps: number
   readonly maxCheckpointBytes: number
   readonly maxStagnantRevisions: number
+  readonly maxProtocolFailures: number
   readonly requireToolEvidence: boolean
   readonly capabilities: readonly SemanticCapability[]
 }
@@ -143,6 +149,12 @@ interface ResolvedConfig {
 interface RepairState {
   readonly turn: number
   readonly revision: number
+  readonly count: number
+}
+
+/** Failed semantic-protocol calls accumulated in one active turn. */
+interface ProtocolFailureState {
+  readonly turn: number
   readonly count: number
 }
 
@@ -160,12 +172,23 @@ function resolveConfig(config: Config): ResolvedConfig {
   if (!Number.isSafeInteger(maxStagnantRevisions) || maxStagnantRevisions < 0) {
     throw new TypeError('maxStagnantRevisions must be a non-negative safe integer')
   }
+  const maxProtocolFailures = config.maxProtocolFailures ?? DEFAULT_MAX_PROTOCOL_FAILURES
+  if (!Number.isSafeInteger(maxProtocolFailures) || maxProtocolFailures < 1) {
+    throw new TypeError('maxProtocolFailures must be a positive safe integer')
+  }
   const requireToolEvidence = config.requireToolEvidence ?? false
   if (typeof requireToolEvidence !== 'boolean') {
     throw new TypeError('requireToolEvidence must be a boolean')
   }
   const capabilities = resolveConfiguredCapabilities(config.capabilities ?? [])
-  return { maxRepairSteps, maxCheckpointBytes, maxStagnantRevisions, requireToolEvidence, capabilities }
+  return {
+    maxRepairSteps,
+    maxCheckpointBytes,
+    maxStagnantRevisions,
+    maxProtocolFailures,
+    requireToolEvidence,
+    capabilities,
+  }
 }
 
 /** Require a live calling agent for session-owned semantic state. */
@@ -267,7 +290,7 @@ function repairText(
 /** Model policy for the semantic checkpoint protocol. */
 const POLICY = `This session uses the semantic agent loop. Maintain a concise semantic state of externally checkable commitments, not hidden chain-of-thought.
 
-Before acting in each user turn, call semantic_checkpoint to refresh the stable goal contract, global plan graph, append-only versioned semantic artifacts, explicit completion criteria, evidence-backed facts, open gaps, active plan node, and next action. Goal ids and definitions remain immutable within one goal version. Completion-criterion ids and descriptions also remain stable. A changed plan graph increments plan.revision and states a new concrete change_reason; a new goal id increments goal.version and starts plan revision 1 without inherited artifacts. Keep semantic operations independent of concrete tools and declare their required capabilities, input artifact ids, and output artifact id. Call semantic_capabilities before relying on a declared capability and after runtime composition may have changed. A missing capability is a plan gap: acquire a provider, choose a supported operation, or ask for help instead of substituting an unverified regex or ad-hoc pipeline. Preserve every committed artifact version and append replacements with the next version. Derived artifacts cite exact input versions; a changed plan or newer upstream version makes dependent artifacts stale. Use locators and content digests instead of copying large payloads into summaries. Use expected_revision 0 only before the first checkpoint in the session. A new user turn does not reset the revision; otherwise use the exact current revision shown in the latest semantic receipt. After every material observation, replace the whole checkpoint. A met criterion and every retained fact require concise evidence. For each criterion, fact, or artifact supported by tools, cite the relevant successful environment-tool call ids in evidence_call_ids. The checkpoint separately records every successful environment-tool result observed in the current turn. Tool-call count, a changed next_action, or active-node movement alone is not material progress. Repeated no-progress revisions are bounded; revise the plan, append or correct an artifact, meet a criterion, close a gap, or request a missing capability. A ready checkpoint must have at least one criterion, every criterion met, no open gaps, no active plan node, and a current artifact for every required plan node. The checkpoint call already contains the complete state, so its following context is only a compact receipt. Call semantic_state only when resume or compaction has hidden the latest complete checkpoint; do not read it after every update.
+Before acting in each user turn, call semantic_checkpoint to refresh the stable goal contract, global plan graph, append-only versioned semantic artifacts, explicit completion criteria, evidence-backed facts, open gaps, active plan node, and next action. The fields goal, criteria, plan, active_node_id, artifacts, facts, gaps, next_action, and status are top-level siblings; plan contains only revision, change_reason, and nodes. Plan nodes describe only task dataflow. Never add semantic_checkpoint, semantic_state, semantic_capabilities, semantic_verify, semantic_finish, their calls, or their receipts as plan nodes, artifacts, or required capabilities: they are the control protocol, not task capabilities. Use an empty required_capabilities array when a task node needs no declared runtime capability. Goal ids and definitions remain immutable within one goal version. Completion-criterion ids and descriptions also remain stable. A changed plan graph increments plan.revision and states a new concrete change_reason; a new goal id increments goal.version and starts plan revision 1 without inherited artifacts. Keep semantic operations independent of concrete tools and declare their required capabilities, input artifact ids, and output artifact id. Call semantic_capabilities before relying on a declared capability and after runtime composition may have changed. A missing capability is a plan gap: acquire a provider, choose a supported operation, or ask for help instead of substituting an unverified regex or ad-hoc pipeline. Preserve every committed artifact version unchanged and append replacements with the next version. Derived artifacts cite exact input versions; a changed plan or newer upstream version makes dependent artifacts stale. Use locators and content digests instead of copying large payloads into summaries. Use expected_revision 0 only before the first checkpoint in the session. A new user turn does not reset the revision; otherwise use the exact current revision shown in the latest semantic receipt. After every material observation, replace the whole checkpoint. A met criterion and every retained fact require concise evidence. For each criterion, fact, or artifact supported by tools, cite the relevant successful environment-tool call ids in evidence_call_ids. The checkpoint separately records every successful environment-tool result observed in the current turn. Tool-call count, a changed next_action, or active-node movement alone is not material progress. Repeated no-progress revisions are bounded; revise the plan, append or correct an artifact, meet a criterion, close a gap, or request a missing capability. A ready checkpoint must include active_node_id: null explicitly, have at least one criterion, every criterion met, no open gaps, and a current artifact for every required task node. For a small task that needs no environment observation, the initial checkpoint may already be ready with one task node, its current answer artifact, an empty required_capabilities array, a met criterion, no gaps, and active_node_id: null. The checkpoint call already contains the complete state, so its following context is only a compact receipt. Call semantic_state only when resume or compaction has hidden the latest complete checkpoint; do not read it after every update.
 
 Before semantic_finish succeeds, emit tool calls without accompanying ordinary assistant narration. Do not give the final answer before the completion gate. When the current-turn checkpoint is ready, call semantic_verify with its exact revision. Verification obligations come from the runtime and registered providers, not from agent-authored criteria. If any required check is violated or unknown, use its detail or counterexample to revise the plan, artifacts, or checkpoint and verify again. When and only when the exact latest ready revision has a passing receipt, call semantic_finish with that revision and the complete final answer. After that tool accepts the answer, do not call another tool; return the approved answer verbatim as the next and final ordinary assistant text.`
 
@@ -280,6 +303,7 @@ Before semantic_finish succeeds, emit tool calls without accompanying ordinary a
 export function apply(ctx: Context, config: Config): void {
   const resolved = resolveConfig(config)
   const repairs = new Map<Agent, RepairState>()
+  const protocolFailures = new Map<Agent, ProtocolFailureState>()
 
   ctx.systemPrompt.section({
     name: 'tool:semantic-loop',
@@ -289,7 +313,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: CHECKPOINT_TOOL,
-    description: 'Replace the complete event-sourced semantic state, including its stable goal contract and global plan graph. Use expected_revision 0 only when the session has no checkpoint.',
+    description: 'Replace the complete event-sourced semantic state. All fields are top-level siblings; plan contains only revision, change_reason, and task-dataflow nodes. Semantic protocol tools are controls, never plan nodes or required capabilities. Use expected_revision 0 only when the session has no checkpoint.',
     parameters: {
       expected_revision: { type: 'integer', required: true, description: '0 only when the session has no checkpoint; otherwise the exact current revision, including after a new user turn.' },
       goal: {
@@ -329,7 +353,7 @@ export function apply(ctx: Context, config: Config): void {
         type: 'object',
         required: true,
         additionalProperties: false,
-        description: 'Versioned directed acyclic graph of semantic operations that preserves global execution intent.',
+        description: 'Versioned task-dataflow DAG. It contains only revision, change_reason, and nodes; semantic_* protocol calls and receipts never belong here.',
         properties: {
           revision: { type: 'integer', required: true, description: '1 initially; increment exactly once whenever the node graph changes.' },
           change_reason: { type: 'string', required: true, description: '"initial-plan" at revision 1; otherwise a new concrete reason for replacing the graph.' },
@@ -346,7 +370,7 @@ export function apply(ctx: Context, config: Config): void {
                 depends_on: { type: 'array', required: true, items: { type: 'string' }, description: 'Plan node ids that must complete first.' },
                 input_artifact_ids: { type: 'array', required: true, items: { type: 'string' }, description: 'Stable artifact ids consumed in this exact order.' },
                 output_artifact_id: { type: 'string', required: true, description: 'Stable artifact id materialized by this node.' },
-                required_capabilities: { type: 'array', required: true, items: { type: 'string' }, description: 'Semantic capabilities needed for a reliable implementation.' },
+                required_capabilities: { type: 'array', required: true, items: { type: 'string' }, description: 'Declared task capabilities needed for a reliable implementation. Use [] when none; semantic_* protocol tools are not capabilities.' },
                 required: { type: 'boolean', required: true, description: 'Whether completion requires a current output artifact from this node.' },
               },
             },
@@ -356,12 +380,12 @@ export function apply(ctx: Context, config: Config): void {
       active_node_id: {
         oneOf: [{ type: 'string' }, { type: 'null' }],
         required: true,
-        description: 'Plan node selected for next_action, or null when no node is active.',
+        description: 'Plan node selected for next_action. This required field must be explicit null in ready state; never omit it.',
       },
       artifacts: {
         type: 'array',
         required: true,
-        description: 'Append-only immutable intermediate results. Keep payloads external and retain only semantic metadata and lineage.',
+        description: 'Append-only immutable task results. Preserve prior versions unchanged, append replacements, and never represent semantic protocol receipts as artifacts.',
         items: {
           type: 'object',
           additionalProperties: false,
@@ -712,10 +736,34 @@ export function apply(ctx: Context, config: Config): void {
     presentCall: args => present('Submit semantic answer', args.answer),
   }))
 
-  ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
-    if (status === 'idle') repairs.delete(agent)
+  ctx.on('tools/result', (exec, result) => {
+    const agent = exec.agent
+    if (agent === undefined || result.isError !== true || exec.rootCallId !== exec.callId
+      || !isSemanticToolName(exec.name)) return
+    const call = agent.session.events.findLast(event => event.type === 'tool/call'
+      && event.data.callId === exec.callId)
+    if (call?.type !== 'tool/call') return
+    const prior = protocolFailures.get(agent)
+    const count = prior?.turn === call.data.turn ? prior.count + 1 : 1
+    protocolFailures.set(agent, { turn: call.data.turn, count })
+    if (count >= resolved.maxProtocolFailures) {
+      agent.cancel({
+        kind: 'hook',
+        reason: `semantic protocol failed ${count} times in turn ${call.data.turn}; limit ${resolved.maxProtocolFailures}`,
+      })
+    }
   })
-  ctx.on('agent/disposed', ({ agent }) => { repairs.delete(agent) })
+
+  ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
+    if (status === 'idle') {
+      repairs.delete(agent)
+      protocolFailures.delete(agent)
+    }
+  })
+  ctx.on('agent/disposed', ({ agent }) => {
+    repairs.delete(agent)
+    protocolFailures.delete(agent)
+  })
   ctx.on('agent/turn-stopping', ({ agent, turn }) => {
     const state = semanticStateOf(agent)
     const completion = semanticCompletionStatusInTurn(agent, turn)

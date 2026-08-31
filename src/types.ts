@@ -302,6 +302,8 @@ export interface SemanticTelemetry {
   readonly checkpointRevisions: number
   /** Top-level calls to semantic protocol tools. */
   readonly semanticToolCalls: number
+  /** Failed top-level semantic-protocol results. */
+  readonly semanticToolFailures: number
   /** Calls that materialize the complete checkpoint for resume or compaction recovery. */
   readonly stateReads: number
   /** Calls that inspect agent-scoped semantic capabilities. */

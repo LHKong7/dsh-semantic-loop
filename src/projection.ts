@@ -223,6 +223,12 @@ export function semanticTelemetryOf(agent: Agent): SemanticTelemetry {
   return {
     checkpointRevisions: state?.revision ?? 0,
     semanticToolCalls: calls.filter(event => isSemanticToolName(event.data.name)).length,
+    semanticToolFailures: events.filter(event => {
+      if (event.type !== 'tool/result') return false
+      const block = event.data.message.content[0]
+      const toolName = callNames.get(block.toolCallId)
+      return block.isError === true && toolName !== undefined && isSemanticToolName(toolName)
+    }).length,
     stateReads: calls.filter(event => event.data.name === STATE_TOOL).length,
     capabilityReads: calls.filter(event => event.data.name === CAPABILITIES_TOOL).length,
     environmentToolCalls: calls.filter(event => !isSemanticToolName(event.data.name)).length,

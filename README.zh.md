@@ -4,7 +4,7 @@
 
 本插件由 LHKong7 以个人项目形式维护，是 DeepSeek Harness 的社区插件，并非 DeepSeek AI 官方软件包。
 
-DeepSeek Harness 的可安装 semantic agent loop。本包导出 profile Bundle、完整的「语义模式」agent preset、loop 插件及其 invariant companion。安装 Bundle 后即可发现该 preset，无需把文件复制到 `dsh` CLI 包中。插件在所属 Session log 中保存有界的全量状态检查点，保留带版本的中间 artifact，暴露可信 capability gap，限制结构性停滞 revision，运行独立 verifier provider，修复过早停止，并且只在存在当前 passing verification receipt 时提交最终答案。它组合现有 Agent、Tool、System Prompt、Session 与 Cordis event 扩展点；不会修改 `@deepseek-ai/dsh-agent-loop`。
+DeepSeek Harness 的可安装 semantic agent loop。本包导出 profile Bundle、完整的「语义模式」agent preset、loop 插件及其 invariant companion。安装 Bundle 后即可发现该 preset，无需把文件复制到 `dsh` CLI 包中。插件在所属 Session log 中保存有界的全量状态检查点，保留带版本的中间 artifact，暴露可信 capability gap，限制结构性停滞 revision 与失败的协议调用，运行独立 verifier provider，修复过早停止，并且只在存在当前 passing verification receipt 时提交最终答案。它组合现有 Agent、Tool、System Prompt、Session 与 Cordis event 扩展点；不会修改 `@deepseek-ai/dsh-agent-loop`。
 
 本包是实验性的 semantic-workflow MVP。conversation model 通过类型化工具编写每个检查点，插件则在局部 observation 之间保持稳定的 goal contract 与带版本的全局 plan。领域无关的 plan 词汇允许独立 observation compiler 或 verifier 替代模型编写 claim，而无需改变 checkpoint 协议。
 
@@ -13,11 +13,11 @@ DeepSeek Harness 的可安装 semantic agent loop。本包导出 profile Bundle�
 随附的 Web 与 Headless profile 模板已经包含此 Bundle。如需把它添加到其他 profile，请安装本包并重启该 profile：
 
 ```sh
-dsh plugin --profile web add dsh-semantic-loop
+dsh plugin --profile web add -w dsh-semantic-loop
 dsh --profile web
 ```
 
-包清单通过 `dsh.bundle.patch` 导出 `cordis.patch.yml`，并通过 `dsh.bundle.agentPresets` 导出 `agent-presets/`。Host patch 只挂载一次 invariant；选择语义模式时才为该 agent 挂载 loop 本身。因此安装 Bundle 不会强制标准、极简、代码或 Cordis 会话使用 semantic 行为。
+包清单通过 `dsh.bundle.patch` 导出 `cordis.patch.yml`，并通过 `dsh.bundle.agentPresets` 导出 `agent-presets/`。Host patch 只挂载一次可选的 DSH invariant registry 与本包的 invariant companion；选择语义模式时才为该 agent 挂载 loop 本身。因此安装 Bundle 不会强制标准、极简、代码或 Cordis 会话使用 semantic 行为。
 
 ```yaml
 - id: semantic-loop
@@ -26,10 +26,14 @@ dsh --profile web
     maxRepairSteps: 3
     maxCheckpointBytes: 65536
     maxStagnantRevisions: 3
+    maxProtocolFailures: 5
     requireToolEvidence: false
     capabilities:
       - id: structured-query
         description: Query structured data through the deployment's database tool.
+
+- id: semantic-loop-invariants
+  name: '@deepseek-ai/dsh-invariants'
 
 - id: semantic-loop-invariant
   name: 'dsh-semantic-loop/invariant'
@@ -40,6 +44,8 @@ dsh --profile web
 `maxCheckpointBytes` 默认为 65,536。它同时限制 canonical checkpoint JSON 与其 UTF-8 模型可见渲染。过大的替换会在进入持久 inbox 前失败，因此单次模型调用无法创建无界的保留快照。
 
 `maxStagnantRevisions` 默认为 `3`。初始化、替换 goal、修改 plan revision、追加 artifact version、新满足 criterion、关闭 gap、增加或更新 fact，以及新关联 evidence 都算 material progress。Tool call、raw observation、修改 `next_action` 与移动 active node 本身都不算。插件最多接受配置数量的连续 no-progress checkpoint，之后必须进行 material update。
+
+`maxProtocolFailures` 默认为 `5`。它统计一个 turn 内失败的顶层 `semantic_*` tool result，包括参数无效，以及 checkpoint、verification 或 finish 被拒绝。达到上限时，插件会用明确的 hook 原因取消当前 turn。同一 turn 内成功的 semantic call 不会清除之前的失败；Agent 回到 idle 后计数重置。
 
 `requireToolEvidence` 默认为 `false`。启用后，ready checkpoint 必须显式引用至少一个在当前 turn 观察到的成功 environment-tool result。需要数据库或其他工具 observation 的 DAB task 应启用它；无需 environment call 的算术等任务应保持禁用。Bundle 会把 invariant companion 与 `@deepseek-ai/dsh-invariants` 一起挂载，以便在发布前拒绝格式错误、revision 不连续、source/content 不一致或 result correlation 错误的检查点流。
 
@@ -87,7 +93,7 @@ DAB 对比让同一 task、model 与 environment-tool budget 运行两次：一�
 
 | Counter | 评测含义 |
 | --- | --- |
-| `semanticToolCalls` | 全部 `semantic_checkpoint`、`semantic_state`、`semantic_capabilities`、`semantic_verify` 与 `semantic_finish` call；作为干预开销单独报告。 |
+| `semanticToolCalls`、`semanticToolFailures` | 全部协议 call 及其中失败的子集；分别报告干预开销与重试开销。 |
 | `verificationAttempts`、`verificationReceipts`、`passedVerifications` | Verifier 执行成本以及 durable/pass receipt 数量。 |
 | `stateReads`、`capabilityReads` | 按需 state recovery 与 capability inspection 开销。 |
 | `environmentToolCalls` | 顶层非 semantic call；用于让两组保持相同 environment-tool budget。 |
@@ -112,7 +118,7 @@ DAB 对比让同一 task、model 与 environment-tool budget 运行两次：一�
 ```markdown
 This session uses the semantic agent loop. Maintain a concise semantic state of externally checkable commitments, not hidden chain-of-thought.
 
-Before acting in each user turn, call semantic_checkpoint to refresh the stable goal contract, global plan graph, append-only versioned semantic artifacts, explicit completion criteria, evidence-backed facts, open gaps, active plan node, and next action. Goal ids and definitions remain immutable within one goal version. Completion-criterion ids and descriptions also remain stable. A changed plan graph increments plan.revision and states a new concrete change_reason; a new goal id increments goal.version and starts plan revision 1 without inherited artifacts. Keep semantic operations independent of concrete tools and declare their required capabilities, input artifact ids, and output artifact id. Call semantic_capabilities before relying on a declared capability and after runtime composition may have changed. A missing capability is a plan gap: acquire a provider, choose a supported operation, or ask for help instead of substituting an unverified regex or ad-hoc pipeline. Preserve every committed artifact version and append replacements with the next version. Derived artifacts cite exact input versions; a changed plan or newer upstream version makes dependent artifacts stale. Use locators and content digests instead of copying large payloads into summaries. Use expected_revision 0 only before the first checkpoint in the session. A new user turn does not reset the revision; otherwise use the exact current revision shown in the latest semantic receipt. After every material observation, replace the whole checkpoint. A met criterion and every retained fact require concise evidence. For each criterion, fact, or artifact supported by tools, cite the relevant successful environment-tool call ids in evidence_call_ids. The checkpoint separately records every successful environment-tool result observed in the current turn. Tool-call count, a changed next_action, or active-node movement alone is not material progress. Repeated no-progress revisions are bounded; revise the plan, append or correct an artifact, meet a criterion, close a gap, or request a missing capability. A ready checkpoint must have at least one criterion, every criterion met, no open gaps, no active plan node, and a current artifact for every required plan node. The checkpoint call already contains the complete state, so its following context is only a compact receipt. Call semantic_state only when resume or compaction has hidden the latest complete checkpoint; do not read it after every update.
+Before acting in each user turn, call semantic_checkpoint to refresh the stable goal contract, global plan graph, append-only versioned semantic artifacts, explicit completion criteria, evidence-backed facts, open gaps, active plan node, and next action. The fields goal, criteria, plan, active_node_id, artifacts, facts, gaps, next_action, and status are top-level siblings; plan contains only revision, change_reason, and nodes. Plan nodes describe only task dataflow. Never add semantic_checkpoint, semantic_state, semantic_capabilities, semantic_verify, semantic_finish, their calls, or their receipts as plan nodes, artifacts, or required capabilities: they are the control protocol, not task capabilities. Use an empty required_capabilities array when a task node needs no declared runtime capability. Goal ids and definitions remain immutable within one goal version. Completion-criterion ids and descriptions also remain stable. A changed plan graph increments plan.revision and states a new concrete change_reason; a new goal id increments goal.version and starts plan revision 1 without inherited artifacts. Keep semantic operations independent of concrete tools and declare their required capabilities, input artifact ids, and output artifact id. Call semantic_capabilities before relying on a declared capability and after runtime composition may have changed. A missing capability is a plan gap: acquire a provider, choose a supported operation, or ask for help instead of substituting an unverified regex or ad-hoc pipeline. Preserve every committed artifact version unchanged and append replacements with the next version. Derived artifacts cite exact input versions; a changed plan or newer upstream version makes dependent artifacts stale. Use locators and content digests instead of copying large payloads into summaries. Use expected_revision 0 only before the first checkpoint in the session. A new user turn does not reset the revision; otherwise use the exact current revision shown in the latest semantic receipt. After every material observation, replace the whole checkpoint. A met criterion and every retained fact require concise evidence. For each criterion, fact, or artifact supported by tools, cite the relevant successful environment-tool call ids in evidence_call_ids. The checkpoint separately records every successful environment-tool result observed in the current turn. Tool-call count, a changed next_action, or active-node movement alone is not material progress. Repeated no-progress revisions are bounded; revise the plan, append or correct an artifact, meet a criterion, close a gap, or request a missing capability. A ready checkpoint must include active_node_id: null explicitly, have at least one criterion, every criterion met, no open gaps, and a current artifact for every required task node. For a small task that needs no environment observation, the initial checkpoint may already be ready with one task node, its current answer artifact, an empty required_capabilities array, a met criterion, no gaps, and active_node_id: null. The checkpoint call already contains the complete state, so its following context is only a compact receipt. Call semantic_state only when resume or compaction has hidden the latest complete checkpoint; do not read it after every update.
 
 Before semantic_finish succeeds, emit tool calls without accompanying ordinary assistant narration. Do not give the final answer before the completion gate. When the current-turn checkpoint is ready, call semantic_verify with its exact revision. Verification obligations come from the runtime and registered providers, not from agent-authored criteria. If any required check is violated or unknown, use its detail or counterexample to revise the plan, artifacts, or checkpoint and verify again. When and only when the exact latest ready revision has a passing receipt, call semantic_finish with that revision and the complete final answer. After that tool accepts the answer, do not call another tool; return the approved answer verbatim as the next and final ordinary assistant text.
 ```

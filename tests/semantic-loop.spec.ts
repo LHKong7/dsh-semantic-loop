@@ -90,6 +90,7 @@ async function setup(
   requireToolEvidence = false,
   maxCheckpointBytes = 65_536,
   maxStagnantRevisions = 3,
+  maxProtocolFailures = 5,
 ) {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
@@ -99,6 +100,7 @@ async function setup(
     requireToolEvidence,
     maxCheckpointBytes,
     maxStagnantRevisions,
+    maxProtocolFailures,
     capabilities: [{ id: 'structured-query', description: 'Query structured data sources.' }],
   })
   const adapter = new MockAdapter(script)
@@ -523,6 +525,7 @@ describe('semantic loop', () => {
     expect(SemanticLoop.semanticTelemetryOf(agent)).toEqual({
       checkpointRevisions: 0,
       semanticToolCalls: 0,
+      semanticToolFailures: 0,
       stateReads: 0,
       capabilityReads: 0,
       environmentToolCalls: 0,
@@ -683,6 +686,10 @@ describe('semantic loop', () => {
 
   it('fails loud on an invalid stagnation limit', async () => {
     await expect(setup([], 3, false, 65_536, -1)).rejects.toThrow(/maxStagnantRevisions expected number >= 0/)
+  })
+
+  it('fails loud on an invalid protocol failure limit', async () => {
+    await expect(setup([], 3, false, 65_536, 3, 0)).rejects.toThrow(/maxProtocolFailures expected number >= 1/)
   })
 
   it('presents every semantic control as a pure generic card', async () => {
@@ -925,6 +932,8 @@ describe('semantic loop', () => {
     expect(adapter.requests[0]?.system).toContain('semantic agent loop')
     expect(adapter.requests[0]?.system).toContain('emit tool calls without accompanying ordinary assistant narration')
     expect(adapter.requests[0]?.system).toContain('A new user turn does not reset the revision')
+    expect(adapter.requests[0]?.system).toContain('they are the control protocol, not task capabilities')
+    expect(adapter.requests[0]?.system).toContain('active_node_id: null explicitly')
     expect(adapter.requests[1]?.messages.some(message => message.content.some(block =>
       block.type === 'text' && block.text.includes('Semantic completion is not initialized')))).toBe(true)
     expect(adapter.requests[2]?.messages.some(message => message.content.some(block =>
@@ -953,6 +962,35 @@ describe('semantic loop', () => {
     expect(agent.session.events.findLast(event => event.type === 'turn/end')?.data.reason).toEqual({ kind: 'completed' })
   })
 
+  it('cancels a turn after its semantic protocol failure budget is exhausted', async () => {
+    const missingActiveNode = { ...ready, active_node_id: undefined }
+    const script = [
+      toolCallResponse('invalid-checkpoint-1', 'semantic_checkpoint', missingActiveNode),
+      toolCallResponse('invalid-checkpoint-2', 'semantic_checkpoint', missingActiveNode),
+      toolCallResponse('invalid-checkpoint-3', 'semantic_checkpoint', missingActiveNode),
+    ]
+    const { agent, adapter } = await setup(script, 3, false, 65_536, 3, 2)
+    agent.followup(createUserMessage({
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'Return 42.' }],
+    }))
+    await agent.whenIdle()
+
+    expect(adapter.requests).toHaveLength(2)
+    expect(SemanticLoop.semanticTelemetryOf(agent)).toMatchObject({
+      semanticToolCalls: 2,
+      semanticToolFailures: 2,
+      checkpointRevisions: 0,
+    })
+    expect(agent.session.events.findLast(event => event.type === 'turn/end')?.data.reason).toEqual({
+      kind: 'aborted',
+      reason: {
+        kind: 'hook',
+        reason: 'semantic protocol failed 2 times in turn 1; limit 2',
+      },
+    })
+  })
+
   it('fails load-time config and unwinds tools with the plugin fiber', async () => {
     const ctx = new Context()
     await mountAgentLoopTestDependencies(ctx)
@@ -965,6 +1003,7 @@ describe('semantic loop', () => {
 
     expect(() => { SemanticLoop.apply(new Context(), { maxRepairSteps: 0 }) }).toThrow(/positive safe integer/)
     expect(() => { SemanticLoop.apply(new Context(), { maxRepairSteps: 1.5 }) }).toThrow(/positive safe integer/)
+    expect(() => { SemanticLoop.apply(new Context(), { maxProtocolFailures: 0 }) }).toThrow(/positive safe integer/)
     expect(() => { SemanticLoop.apply(new Context(), { maxRepairSteps: 1, requireToolEvidence: 'yes' as never }) }).toThrow(/must be a boolean/)
 
     const rawCtx = new Context()

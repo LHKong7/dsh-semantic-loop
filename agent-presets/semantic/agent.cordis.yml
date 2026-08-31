@@ -42,6 +42,7 @@
   config:
     maxRepairSteps: 3
     maxStagnantRevisions: 3
+    maxProtocolFailures: 5
     capabilities:
       - id: shell-execution
         description: Run bounded shell commands through the preset's sandboxed shell tool.
