@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { foldSemanticStates, semanticMessages } from './state.ts'
+import { foldSemanticVerificationPosition, semanticVerificationMessages } from './verification.ts'
 
 const PACKAGE_NAME = 'dsh-semantic-loop'
 
@@ -17,6 +18,7 @@ const install: InvariantInstaller = Object.assign((ctx: Context, fail: Invariant
   for (const session of ctx.sessions.list()) {
     try {
       foldSemanticStates(session.events)
+      foldSemanticVerificationPosition(session.events, session.id)
     } catch (error: unknown) {
       fail(`session "${session.id}" violates the semantic checkpoint stream: ${(error as Error).message}`)
     }
@@ -24,9 +26,11 @@ const install: InvariantInstaller = Object.assign((ctx: Context, fail: Invariant
   ctx.on('internal/dispatch', (_mode, eventName, args) => {
     if (eventName !== 'session/event') return
     const [session, event] = args as [Session, SessionEvent]
-    if (semanticMessages(event).length === 0) return
+    if (semanticMessages(event).length === 0 && semanticVerificationMessages(event).length === 0) return
     try {
-      foldSemanticStates([...session.events, event])
+      const candidate = [...session.events, event]
+      foldSemanticStates(candidate)
+      foldSemanticVerificationPosition(candidate, session.id)
     } catch (error: unknown) {
       fail(`session event ${event.seq} violates the semantic checkpoint stream: ${(error as Error).message}`)
     }

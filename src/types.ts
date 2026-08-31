@@ -79,6 +79,83 @@ export interface SemanticArtifact extends SemanticArtifactRef {
 /** Whether an artifact is still usable under the latest plan and input versions. */
 export type SemanticArtifactStatus = 'current' | 'stale'
 
+/** Trust origin of one verifier-defined obligation. */
+export type SemanticObligationIssuer = 'system' | 'task' | 'policy' | 'agent'
+
+/** Machine-checkable requirement evaluated independently from model-authored criteria. */
+export interface SemanticVerificationCheck {
+  /** Stable verifier-owned check identity. */
+  readonly id: string
+  /** Extensible strategy name such as `runtime.lineage` or `smt.numeric-bound`. */
+  readonly kind: string
+  /** Human-readable requirement being checked. */
+  readonly description: string
+  /** Trusted source of the requirement. */
+  readonly issuer: SemanticObligationIssuer
+  /** Whether an unproved result prevents semantic completion. */
+  readonly required: boolean
+  /** Check result under the verifier's declared specification version. */
+  readonly status: 'proved' | 'violated' | 'unknown'
+  /** Concise result, violation, or counterexample description. */
+  readonly detail: string
+}
+
+/** Output of one independently registered verification strategy. */
+export interface SemanticVerificationReport {
+  /** Stable provider identity. */
+  readonly verifierId: string
+  /** Version of the rules or formal specification used by this provider. */
+  readonly specVersion: string
+  /** Strength of the provider's result; never inferred from a passing verdict. */
+  readonly assurance: 'evidence-backed' | 'runtime-checked' | 'formally-proved'
+  /** Requirements evaluated by this provider. */
+  readonly checks: readonly SemanticVerificationCheck[]
+  /** Digest of a checkable proof or certificate, or `null` when none exists. */
+  readonly proofDigest: string | null
+}
+
+/** Immutable input passed to every semantic verifier provider. */
+export interface SemanticVerificationRequest {
+  /** Session that owns the checkpoint. */
+  readonly sessionId: SessionId
+  /** Exact semantic-state revision. */
+  readonly revision: number
+  /** SHA-256 digest of the canonical checkpoint. */
+  readonly checkpointHash: string
+  /** Complete checkpoint being verified. */
+  readonly checkpoint: SemanticCheckpoint
+  /** Successful environment-tool results cited by checkpoint claims. */
+  readonly evidence: readonly SemanticEvidence[]
+}
+
+/** Durable aggregate bound to one exact semantic checkpoint. */
+export interface SemanticVerificationReceipt {
+  /** Session that owns the verified checkpoint. */
+  readonly sessionId: SessionId
+  /** Verified semantic-state revision. */
+  readonly revision: number
+  /** SHA-256 digest of the verified canonical checkpoint. */
+  readonly checkpointHash: string
+  /** Aggregate result over every required check. */
+  readonly verdict: 'passed' | 'failed' | 'unknown'
+  /** Versioned provider results retained for replay and diagnosis. */
+  readonly reports: readonly SemanticVerificationReport[]
+}
+
+/** Durable provenance carried by a verifier-generated receipt message. */
+export interface SemanticVerificationSource {
+  /** Message-source discriminant. */
+  readonly kind: 'semantic-verification'
+  /** Semantic-verification source format version. */
+  readonly version: 1
+  /** Session that owns this receipt. */
+  readonly sessionId: SessionId
+  /** Successful `semantic_verify` call that generated the receipt. */
+  readonly verificationCallId: CallId
+  /** Complete verifier-authored receipt. */
+  readonly receipt: SemanticVerificationReceipt
+}
+
 /** One objective-specific condition used by the completion gate. */
 export interface SemanticCriterion {
   /** Stable lower-kebab-case identity within the checkpoint. */
@@ -183,6 +260,12 @@ export interface SemanticTelemetry {
   readonly successfulEnvironmentToolCalls: number
   /** Calls to `semantic_finish`, including failed attempts. */
   readonly finishAttempts: number
+  /** Calls to `semantic_verify`, including failed provider executions. */
+  readonly verificationAttempts: number
+  /** Durable verifier-generated receipts, including failed and unknown verdicts. */
+  readonly verificationReceipts: number
+  /** Durable verification receipts whose required obligations all passed. */
+  readonly passedVerifications: number
   /** Successful `semantic_finish` results, including approvals later invalidated. */
   readonly acceptedFinishResults: number
   /** Stopping-boundary corrective messages committed to the model transcript. */
@@ -209,5 +292,7 @@ declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     /** Whole semantic-state replacement emitted by the experimental semantic loop. */
     'semantic-checkpoint': SemanticCheckpointSource
+    /** Verifier-authored receipt bound to one exact semantic checkpoint revision and digest. */
+    'semantic-verification': SemanticVerificationSource
   }
 }

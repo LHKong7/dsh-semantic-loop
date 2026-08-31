@@ -1,10 +1,11 @@
 /** Completion, evidence, and benchmark projections over the durable Session log. */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { CallId } from '@deepseek-ai/dsh-llm'
+import type { CallId, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { FINISH_TOOL, PLUGIN, STATE_TOOL, isSemanticToolName, latestEnvironmentResultSeq } from './protocol.ts'
+import { FINISH_TOOL, PLUGIN, STATE_TOOL, VERIFY_TOOL, isSemanticToolName, latestEnvironmentResultSeq } from './protocol.ts'
 import { foldSemanticStatePosition, semanticEvidenceCallIds, semanticStateOf } from './state.ts'
+import { foldSemanticVerificationPosition, semanticCheckpointHash } from './verification.ts'
 import type {
   SemanticCompletion,
   SemanticEvidence,
@@ -16,6 +17,7 @@ interface FinishApproval {
   readonly turn: number
   readonly revision: number
   readonly answer: string
+  readonly callSeq: number
   readonly resultSeq: number
 }
 
@@ -26,7 +28,7 @@ export type SemanticCompletionStatus =
   | {
     readonly kind: 'invalidated'
     readonly approval: FinishApproval
-    readonly reason: 'state-changed' | 'stale-checkpoint' | 'later-tool-call' | 'missing-final-answer' | 'mismatched-final-answer'
+    readonly reason: 'state-changed' | 'stale-checkpoint' | 'unverified' | 'later-tool-call' | 'missing-final-answer' | 'mismatched-final-answer'
   }
 
 /** Parse one potential semantic-finish call without trusting model JSON. */
@@ -38,7 +40,7 @@ function finishCall(event: SessionEvent<'tool/call'>): Omit<FinishApproval, 'tur
     const answer = args['answer']
     if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) return undefined
     if (typeof answer !== 'string' || answer.trim().length === 0) return undefined
-    return { revision, answer: answer.trim() }
+    return { revision, answer: answer.trim(), callSeq: event.seq }
   } catch (_invalidModelArguments) {
     // ToolRuntime records the failed call; it cannot approve an answer.
     return undefined
@@ -108,6 +110,15 @@ export function semanticCompletionStatusInTurn(agent: Agent, turn: number): Sema
   const environmentResultSeq = latestEnvironmentResultSeq(turnEvents)
   if (environmentResultSeq !== undefined && position.checkpointCallSeq <= environmentResultSeq) {
     return { kind: 'invalidated', approval, reason: 'stale-checkpoint' }
+  }
+  const verification = foldSemanticVerificationPosition(
+    turnEvents.filter(event => event.seq < approval.callSeq),
+    agent.id,
+  )
+  if (verification === undefined || verification.receipt.verdict !== 'passed'
+    || verification.receipt.revision !== approval.revision
+    || verification.receipt.checkpointHash !== semanticCheckpointHash(position.state.checkpoint)) {
+    return { kind: 'invalidated', approval, reason: 'unverified' }
   }
   if (turnEvents.some(event => event.type === 'tool/call' && event.data.turn === turn
     && event.seq > approval.resultSeq)) {
@@ -198,6 +209,15 @@ export function semanticTelemetryOf(agent: Agent): SemanticTelemetry {
       successfulEnvironmentToolCalls++
     }
   }
+  const verificationMessages = new Map<string, UserMessage>()
+  for (const event of events) {
+    const messages = event.type === 'user/message'
+      ? [event.data]
+      : event.type === 'agent/inbox/spliced' ? event.data.inserted : []
+    for (const message of messages) {
+      if (message.source.kind === 'semantic-verification') verificationMessages.set(message.id, message)
+    }
+  }
   return {
     checkpointRevisions: state?.revision ?? 0,
     semanticToolCalls: calls.filter(event => isSemanticToolName(event.data.name)).length,
@@ -205,6 +225,10 @@ export function semanticTelemetryOf(agent: Agent): SemanticTelemetry {
     environmentToolCalls: calls.filter(event => !isSemanticToolName(event.data.name)).length,
     successfulEnvironmentToolCalls,
     finishAttempts: calls.filter(event => event.data.name === FINISH_TOOL).length,
+    verificationAttempts: calls.filter(event => event.data.name === VERIFY_TOOL).length,
+    verificationReceipts: verificationMessages.size,
+    passedVerifications: [...verificationMessages.values()].filter(message =>
+      message.source.kind === 'semantic-verification' && message.source.receipt.verdict === 'passed').length,
     acceptedFinishResults: finishApprovals(events).length,
     repairSteps: events.filter(event => event.type === 'user/message'
       && event.data.source.kind === 'plugin' && event.data.source.plugin === PLUGIN).length,

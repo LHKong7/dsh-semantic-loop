@@ -9,6 +9,8 @@ export const PLUGIN = 'dsh-semantic-loop'
 export const CHECKPOINT_TOOL = 'semantic_checkpoint'
 /** On-demand read tool for the latest complete semantic state. */
 export const STATE_TOOL = 'semantic_state'
+/** Independent verification tool name. */
+export const VERIFY_TOOL = 'semantic_verify'
 /** Completion approval tool name. */
 export const FINISH_TOOL = 'semantic_finish'
 
@@ -19,7 +21,7 @@ export const FINISH_TOOL = 'semantic_finish'
  * @returns Whether the call is semantic protocol traffic.
  */
 export function isSemanticToolName(name: string): boolean {
-  return name === CHECKPOINT_TOOL || name === STATE_TOOL || name === FINISH_TOOL
+  return name === CHECKPOINT_TOOL || name === STATE_TOOL || name === VERIFY_TOOL || name === FINISH_TOOL
 }
 
 /**

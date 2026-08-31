@@ -13,12 +13,13 @@ import {
   FINISH_TOOL,
   PLUGIN,
   STATE_TOOL,
+  VERIFY_TOOL,
   currentTurnObservedCallIds,
   latestEnvironmentResultSeq,
   latestTurnStartSeq,
   successfulEnvironmentCallIds,
 } from './protocol.ts'
-import { semanticCompletionStatusInTurn } from './projection.ts'
+import { semanticCompletionStatusInTurn, semanticEvidenceOf } from './projection.ts'
 import {
   renderSemanticCheckpoint,
   renderSemanticCheckpointReceipt,
@@ -28,7 +29,14 @@ import {
   semanticStateOf,
 } from './state.ts'
 import type { SemanticCheckpointInput } from './state.ts'
-import type { SemanticState } from './types.ts'
+import type { SemanticState, SemanticVerificationReceipt } from './types.ts'
+import {
+  renderSemanticVerificationReceipt,
+  semanticCheckpointHash,
+  semanticVerificationOf,
+  semanticVerificationPositionOf,
+  verifySemanticCheckpoint,
+} from './verification.ts'
 
 export type * from './types.ts'
 export {
@@ -56,6 +64,19 @@ export {
   semanticEvidenceOf,
   semanticTelemetryOf,
 } from './projection.ts'
+export {
+  builtinSemanticVerification,
+  decodeSemanticVerificationSource,
+  foldSemanticVerificationPosition,
+  isSemanticVerificationMessage,
+  renderSemanticVerificationReceipt,
+  semanticCheckpointHash,
+  semanticVerificationMessages,
+  semanticVerificationOf,
+  semanticVerificationPositionOf,
+  semanticVerificationVerdict,
+  verifySemanticCheckpoint,
+} from './verification.ts'
 
 /** Cordis plugin name. */
 export const name = 'semantic-loop'
@@ -152,17 +173,38 @@ const STATE_RESULT_SCHEMA = {
   },
 } as const
 
+const VERIFY_RESULT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    revision: { type: 'integer', required: true },
+    checkpointHash: { type: 'string', required: true },
+    verdict: { type: 'string', required: true, enum: ['passed', 'failed', 'unknown'] },
+    verifierReports: { type: 'integer', required: true },
+    requiredChecks: { type: 'integer', required: true },
+    provedRequiredChecks: { type: 'integer', required: true },
+  },
+} as const
+
 /** Generic pending presentation for semantic controls. */
 function present(title: string, rawInput: unknown): GenericCallView {
   return { card: 'generic', title, kind: 'other', rawInput }
 }
 
 /** Corrective instruction for the current gate state. */
-function repairText(state: SemanticState | undefined): string {
+function repairText(
+  state: SemanticState | undefined,
+  verification: SemanticVerificationReceipt | undefined,
+): string {
   if (state === undefined) {
     return `Semantic completion is not initialized. Call ${CHECKPOINT_TOOL} with the objective, explicit completion criteria, current evidence, open gaps, and next action before attempting to finish.`
   }
   if (state.checkpoint.status === 'ready') {
+    const hash = semanticCheckpointHash(state.checkpoint)
+    if (verification === undefined || verification.revision !== state.revision
+      || verification.checkpointHash !== hash || verification.verdict !== 'passed') {
+      return `Semantic state r${state.revision} is ready but lacks a current passing verification receipt. Call ${VERIFY_TOOL} with expected_revision ${state.revision}; revise the checkpoint if a required check is violated or unknown.`
+    }
     return `Semantic state r${state.revision} is ready. Submit the final answer through ${FINISH_TOOL}; ordinary assistant text does not satisfy the completion protocol.`
   }
   const unmet = state.checkpoint.criteria.filter(item => item.status === 'unmet').map(item => item.id)
@@ -179,7 +221,7 @@ const POLICY = `This session uses the semantic agent loop. Maintain a concise se
 
 Before acting in each user turn, call semantic_checkpoint to refresh the stable goal contract, global plan graph, append-only versioned semantic artifacts, explicit completion criteria, evidence-backed facts, open gaps, active plan node, and next action. Goal ids and definitions remain immutable within one goal version. Completion-criterion ids and descriptions also remain stable. A changed plan graph increments plan.revision and states a new concrete change_reason; a new goal id increments goal.version and starts plan revision 1 without inherited artifacts. Keep semantic operations independent of concrete tools and declare their required capabilities, input artifact ids, and output artifact id. Preserve every committed artifact version and append replacements with the next version. Derived artifacts cite exact input versions; a changed plan or newer upstream version makes dependent artifacts stale. Use locators and content digests instead of copying large payloads into summaries. Use expected_revision 0 only before the first checkpoint in the session. A new user turn does not reset the revision; otherwise use the exact current revision shown in the latest semantic receipt. After every material observation, replace the whole checkpoint. A met criterion and every retained fact require concise evidence. For each criterion, fact, or artifact supported by tools, cite the relevant successful environment-tool call ids in evidence_call_ids. The checkpoint separately records every successful environment-tool result observed in the current turn. A ready checkpoint must have at least one criterion, every criterion met, no open gaps, no active plan node, and a current artifact for every required plan node. The checkpoint call already contains the complete state, so its following context is only a compact receipt. Call semantic_state only when resume or compaction has hidden the latest complete checkpoint; do not read it after every update.
 
-Before semantic_finish succeeds, emit tool calls without accompanying ordinary assistant narration. Do not give the final answer before the completion gate. When and only when the current-turn checkpoint is ready, call semantic_finish with its exact revision and the complete final answer. After that tool accepts the answer, do not call another tool; return the approved answer verbatim as the next and final ordinary assistant text.`
+Before semantic_finish succeeds, emit tool calls without accompanying ordinary assistant narration. Do not give the final answer before the completion gate. When the current-turn checkpoint is ready, call semantic_verify with its exact revision. Verification obligations come from the runtime and registered providers, not from agent-authored criteria. If any required check is violated or unknown, use its detail or counterexample to revise the plan, artifacts, or checkpoint and verify again. When and only when the exact latest ready revision has a passing receipt, call semantic_finish with that revision and the complete final answer. After that tool accepts the answer, do not call another tool; return the approved answer verbatim as the next and final ordinary assistant text.`
 
 /**
  * Register the semantic protocol, tools, and stopping-boundary repair.
@@ -469,6 +511,68 @@ export function apply(ctx: Context, config: Config): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: VERIFY_TOOL,
+    description: 'Run independent runtime and registered verifier obligations against the exact latest ready checkpoint. The verifier, not the agent, authors the durable receipt.',
+    parameters: {
+      expected_revision: { type: 'integer', required: true, description: 'Exact latest ready checkpoint revision.' },
+    },
+    output: {
+      schema: VERIFY_RESULT_SCHEMA,
+      render: (_args, value) => [{
+        type: 'text',
+        text: `Semantic verification ${value.verdict} for r${value.revision}: ${value.provedRequiredChecks}/${value.requiredChecks} required checks proved across ${value.verifierReports} reports (checkpoint ${value.checkpointHash}).`,
+      }],
+    },
+    async execute(args, exec) {
+      const agent = callingAgent(exec.agent, VERIFY_TOOL)
+      const position = semanticStatePositionOf(agent)
+      const current = position?.state
+      if (position === undefined || current === undefined) throw new Error('semantic verification requires an initialized checkpoint')
+      const turnStartSeq = latestTurnStartSeq(agent.session.events)
+      if (turnStartSeq !== undefined && position.checkpointCallSeq <= turnStartSeq) {
+        throw new Error('semantic verification requires a checkpoint created in the current turn')
+      }
+      const environmentResultSeq = latestEnvironmentResultSeq(agent.session.events)
+      if (environmentResultSeq !== undefined && position.checkpointCallSeq <= environmentResultSeq) {
+        throw new Error('semantic verification requires a checkpoint created after the latest environment-tool result')
+      }
+      if (args.expected_revision !== current.revision) {
+        throw new Error(`semantic verification stale revision: expected ${current.revision}, got ${args.expected_revision}`)
+      }
+      if (current.checkpoint.status !== 'ready') {
+        throw new Error(`semantic verification requires ready state; revision ${current.revision} is exploring`)
+      }
+      const receipt = await verifySemanticCheckpoint(
+        ctx,
+        agent,
+        current.revision,
+        current.checkpoint,
+        semanticEvidenceOf(agent),
+      )
+      exec.deferContext(createUserMessage({
+        source: {
+          kind: 'semantic-verification',
+          version: 1,
+          sessionId: agent.id,
+          verificationCallId: exec.callId,
+          receipt,
+        },
+        content: [{ type: 'text', text: renderSemanticVerificationReceipt(receipt) }],
+      }))
+      const requiredChecks = receipt.reports.flatMap(report => report.checks).filter(check => check.required)
+      return {
+        revision: receipt.revision,
+        checkpointHash: receipt.checkpointHash,
+        verdict: receipt.verdict,
+        verifierReports: receipt.reports.length,
+        requiredChecks: requiredChecks.length,
+        provedRequiredChecks: requiredChecks.filter(check => check.status === 'proved').length,
+      }
+    },
+    presentCall: args => present('Verify semantic state', args),
+  }))
+
+  ctx.tools.register(defineTool({
     name: FINISH_TOOL,
     description: 'Approve the complete final answer at the exact latest ready semantic checkpoint revision. The next assistant message must return the approved answer verbatim.',
     parameters: {
@@ -501,6 +605,17 @@ export function apply(ctx: Context, config: Config): void {
       if (current.checkpoint.status !== 'ready') {
         throw new Error(`semantic completion requires ready state; revision ${current.revision} is exploring`)
       }
+      const verification = semanticVerificationPositionOf(agent)
+      const checkpointHash = semanticCheckpointHash(current.checkpoint)
+      if (verification === undefined
+        || verification.receipt.revision !== current.revision
+        || verification.receipt.checkpointHash !== checkpointHash
+        || verification.verificationCallSeq <= position.checkpointCallSeq) {
+        throw new Error(`semantic completion requires a current verification receipt for revision ${current.revision}`)
+      }
+      if (verification.receipt.verdict !== 'passed') {
+        throw new Error(`semantic completion requires passed verification; current verdict is ${verification.receipt.verdict}`)
+      }
       const answer = args.answer.trim()
       if (answer.length === 0) throw new Error('semantic completion answer must be non-empty')
       return Promise.resolve({ revision: current.revision, answer })
@@ -528,7 +643,9 @@ export function apply(ctx: Context, config: Config): void {
     repairs.set(agent, { turn, revision, count })
     let text: string
     if (completion.kind === 'unapproved') {
-      text = repairText(state)
+      text = repairText(state, semanticVerificationOf(agent))
+    } else if (completion.reason === 'unverified') {
+      text = `semantic_finish had no current passing verification receipt. Re-establish a ready checkpoint if needed, call ${VERIFY_TOOL} with the exact revision, then call ${FINISH_TOOL} again only after verification passes.`
     } else if (completion.reason === 'mismatched-final-answer' || completion.reason === 'missing-final-answer') {
       text = `Semantic completion approved an answer, but the next ordinary assistant message did not match it. Return the following answer verbatim and do not call another tool:\n\n${completion.approval.answer}`
     } else {

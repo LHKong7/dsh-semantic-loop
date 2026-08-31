@@ -208,6 +208,10 @@ describe('semantic loop', () => {
     await execute(ctx, agent, 'semantic_checkpoint', { ...ready, expected_revision: 1 })
     const stale = await execute(ctx, agent, 'semantic_finish', { expected_revision: 1, answer: '42' })
     expect(stale.isError).toBe(true)
+    const unverified = await execute(ctx, agent, 'semantic_finish', { expected_revision: 2, answer: '42' })
+    expect(resultText(unverified)).toContain('requires a current verification receipt')
+    const verification = await execute(ctx, agent, 'semantic_verify', { expected_revision: 2 })
+    expect(verification.value).toMatchObject({ verdict: 'passed', requiredChecks: 4, provedRequiredChecks: 4 })
     const complete = await execute(ctx, agent, 'semantic_finish', { expected_revision: 2, answer: '  42  ' })
     expect(complete.isError).toBe(false)
     expect(complete.concludesTurn).toBeUndefined()
@@ -217,6 +221,59 @@ describe('semantic loop', () => {
     const blank = await execute(ctx, agent, 'semantic_finish', { expected_revision: 2, answer: '   ' })
     expect(blank.isError).toBe(true)
     expect(resultText(blank)).toContain('answer must be non-empty')
+  })
+
+  it('lets independent providers block completion and rejects agent-authored required checks', async () => {
+    const blocked = await setup()
+    blocked.agent.ctx.on('semantic/verify', async (_request, next) => [
+      ...await next(),
+      {
+        verifierId: 'task-policy',
+        specVersion: 'task-v1',
+        assurance: 'formally-proved' as const,
+        checks: [{
+          id: 'answer-bound',
+          kind: 'smt.answer-bound',
+          description: 'The final value satisfies the trusted task bound.',
+          issuer: 'task' as const,
+          required: true,
+          status: 'violated' as const,
+          detail: 'counterexample: 42 is greater than the allowed maximum 40',
+        }],
+        proofDigest: 'sha256:counterexample-42',
+      },
+    ])
+    await execute(blocked.ctx, blocked.agent, 'semantic_checkpoint', ready)
+    const failed = await execute(blocked.ctx, blocked.agent, 'semantic_verify', { expected_revision: 1 })
+    expect(failed.value).toMatchObject({ verdict: 'failed', requiredChecks: 5, provedRequiredChecks: 4 })
+    expect(SemanticLoop.semanticVerificationOf(blocked.agent)).toMatchObject({ verdict: 'failed', revision: 1 })
+    const finish = await execute(blocked.ctx, blocked.agent, 'semantic_finish', { expected_revision: 1, answer: '42' })
+    expect(resultText(finish)).toContain('current verdict is failed')
+
+    const untrusted = await setup()
+    untrusted.agent.ctx.on('semantic/verify', async (_request, next) => [
+      ...await next(),
+      {
+        verifierId: 'agent-proposal',
+        specVersion: '1',
+        assurance: 'evidence-backed' as const,
+        checks: [{
+          id: 'self-selected',
+          kind: 'agent.claim',
+          description: 'The agent selected this requirement.',
+          issuer: 'agent' as const,
+          required: true,
+          status: 'proved' as const,
+          detail: 'self-reported',
+        }],
+        proofDigest: null,
+      },
+    ])
+    await execute(untrusted.ctx, untrusted.agent, 'semantic_checkpoint', ready)
+    const rejected = await execute(untrusted.ctx, untrusted.agent, 'semantic_verify', { expected_revision: 1 })
+    expect(rejected.isError).toBe(true)
+    expect(resultText(rejected)).toContain('agent-issued semantic verification check')
+    expect(SemanticLoop.semanticVerificationOf(untrusted.agent)).toBeUndefined()
   })
 
   it.each([false, true])('requires a checkpoint after a later environment result (error=%s)', async (isError) => {
@@ -246,6 +303,7 @@ describe('semantic loop', () => {
 
     const refreshed = await execute(ctx, agent, 'semantic_checkpoint', { ...ready, expected_revision: 1 })
     expect(refreshed.isError).toBe(false)
+    expect((await execute(ctx, agent, 'semantic_verify', { expected_revision: 2 })).isError).toBe(false)
     const accepted = await execute(ctx, agent, 'semantic_finish', { expected_revision: 2, answer: '42' })
     expect(accepted.isError).toBe(false)
   })
@@ -382,6 +440,9 @@ describe('semantic loop', () => {
       environmentToolCalls: 0,
       successfulEnvironmentToolCalls: 0,
       finishAttempts: 0,
+      verificationAttempts: 0,
+      verificationReceipts: 0,
+      passedVerifications: 0,
       acceptedFinishResults: 0,
       repairSteps: 0,
       evidenceToolResults: 0,
@@ -540,6 +601,9 @@ describe('semantic loop', () => {
     expect(ctx.tools.get('semantic_state')?.presentCall?.({})).toEqual({
       card: 'generic', title: 'Read semantic state', kind: 'other', rawInput: {},
     })
+    expect(ctx.tools.get('semantic_verify')?.presentCall?.({ expected_revision: 1 })).toEqual({
+      card: 'generic', title: 'Verify semantic state', kind: 'other', rawInput: { expected_revision: 1 },
+    })
   })
 
   it('repairs every semantic state and clears repair tracking on lifecycle events', async () => {
@@ -570,6 +634,9 @@ describe('semantic loop', () => {
 
     await execute(ctx, agent, 'semantic_checkpoint', { ...ready, expected_revision: 2 })
     await stop(ctx, agent)
+    expect(userText(steered.at(-1)!)).toContain('lacks a current passing verification receipt')
+    await execute(ctx, agent, 'semantic_verify', { expected_revision: 3 })
+    await stop(ctx, agent)
     expect(userText(steered.at(-1)!)).toContain('is ready. Submit the final answer')
 
     agentEvents(ctx, agent).emit('agent/status', { status: 'running' })
@@ -589,6 +656,7 @@ describe('semantic loop', () => {
     const { ctx, agent } = await setup()
     const steered = captureSteering(agent)
     await execute(ctx, agent, 'semantic_checkpoint', ready)
+    await execute(ctx, agent, 'semantic_verify', { expected_revision: 1 })
     const malformed = CallId('finish-malformed')
     const blank = CallId('finish-blank')
     const accepted = CallId('finish-accepted')
@@ -693,6 +761,7 @@ describe('semantic loop', () => {
     const { ctx, agent } = await setup()
     const steered = captureSteering(agent)
     await execute(ctx, agent, 'semantic_checkpoint', ready)
+    await execute(ctx, agent, 'semantic_verify', { expected_revision: 1 })
     const approved = CallId('finish-before-more-work')
     agent.session.append('tool/call', {
       turn: 1, step: 1, callId: approved, name: 'semantic_finish',
@@ -730,7 +799,7 @@ describe('semantic loop', () => {
     expect(userText(steered.at(-1)!)).toContain('invalidated its approval')
     expect(SemanticLoop.semanticTelemetryOf(agent)).toMatchObject({
       checkpointRevisions: 2,
-      semanticToolCalls: 3,
+      semanticToolCalls: 4,
       stateReads: 0,
       environmentToolCalls: 1,
       finishAttempts: 1,
@@ -742,6 +811,7 @@ describe('semantic loop', () => {
     const script = [
       textResponse('Premature answer.'),
       toolCallResponse('checkpoint-1', 'semantic_checkpoint', ready),
+      toolCallResponse('verify-1', 'semantic_verify', { expected_revision: 1 }),
       toolCallResponse('finish-1', 'semantic_finish', { expected_revision: 1, answer: '42' }),
       textResponse('forty two'),
       textResponse('42'),
@@ -753,7 +823,7 @@ describe('semantic loop', () => {
     }))
     await agent.whenIdle()
 
-    expect(adapter.requests).toHaveLength(5)
+    expect(adapter.requests).toHaveLength(6)
     expect(adapter.requests[0]?.system).toContain('semantic agent loop')
     expect(adapter.requests[0]?.system).toContain('emit tool calls without accompanying ordinary assistant narration')
     expect(adapter.requests[0]?.system).toContain('A new user turn does not reset the revision')
@@ -761,7 +831,7 @@ describe('semantic loop', () => {
       block.type === 'text' && block.text.includes('Semantic completion is not initialized')))).toBe(true)
     expect(adapter.requests[2]?.messages.some(message => message.content.some(block =>
       block.type === 'text' && block.text.includes('Semantic state r1')))).toBe(true)
-    expect(adapter.requests[4]?.messages.some(message => message.content.some(block =>
+    expect(adapter.requests[5]?.messages.some(message => message.content.some(block =>
       block.type === 'text' && block.text.includes('did not match it')))).toBe(true)
     const finalResult = agent.session.events.findLast(event => event.type === 'tool/result')
     expect(finalResult?.type).toBe('tool/result')
@@ -776,7 +846,7 @@ describe('semantic loop', () => {
     expect(SemanticLoop.semanticCompletionInTurn(agent, 1)).toEqual({ turn: 1, revision: 1, answer: '42' })
     expect(SemanticLoop.semanticTelemetryOf(agent)).toMatchObject({
       checkpointRevisions: 1,
-      semanticToolCalls: 2,
+      semanticToolCalls: 3,
       environmentToolCalls: 0,
       finishAttempts: 1,
       acceptedFinishResults: 1,
