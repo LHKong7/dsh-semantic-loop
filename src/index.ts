@@ -115,7 +115,7 @@ export interface Config {
   /** Require a ready checkpoint to cite at least one successful environment-tool result from the current turn. */
   readonly requireToolEvidence?: boolean
   /** Deployment-declared semantic capabilities available to this preset. */
-  readonly capabilities?: readonly SemanticCapability[]
+  readonly capabilities?: SemanticCapability[]
 }
 
 /** Loader schema for the experimental semantic loop. */
@@ -591,8 +591,8 @@ export function apply(ctx: Context, config: Config): void {
       return {
         providers: inventory.reports.length,
         available: inventory.available.map(capability => capability.id),
-        required,
-        missing,
+        required: [...required],
+        missing: [...missing],
       }
     },
     presentCall: args => present('Inspect semantic capabilities', args),

@@ -6,7 +6,7 @@ Community-maintained by LHKong7. This is a personal DeepSeek Harness plugin and 
 
 Installable semantic agent loop for DeepSeek Harness. The package exports a profile Bundle, a full `Semantic mode` agent preset, the loop plugin, and its invariant companion. Installing the Bundle makes the preset discoverable without copying files into the `dsh` CLI package. The plugin keeps a bounded whole-state checkpoint in the owning Session log, preserves versioned intermediate artifacts, exposes trusted capability gaps, limits structurally stagnant revisions, runs independent verifier providers, repairs premature stopping, and accepts a final answer only after a current passing verification receipt. It composes over the existing Agent, Tool, System Prompt, Session, and Cordis event extension points; it does not modify `@deepseek-ai/dsh-agent-loop`.
 
-This package is an experimental semantic-workflow MVP. The conversation model authors each checkpoint through a typed tool, while the plugin preserves a stable goal contract and versioned global plan across local observations. An independent observation compiler and verifier can replace model-authored claims later without changing the domain-neutral plan vocabulary.
+This package is an experimental semantic-workflow MVP. The conversation model authors each checkpoint through a typed tool, while the plugin preserves a stable goal contract and versioned global plan across local observations. The domain-neutral plan vocabulary allows an independent observation compiler or verifier to replace model-authored claims without changing the checkpoint protocol.
 
 ## Config
 
@@ -124,6 +124,17 @@ The fixed policy and five tool schemas appear on every request. Each revision ap
 #### KV Cache effect
 
 The system prefix and tool schemas remain stable while plugin generation and config remain unchanged. Checkpoint, tool-result, and repair messages append after the reusable prefix. A later checkpoint does not rewrite earlier request bytes.
+
+## Development
+
+The repository's `.npmrc` enables legacy peer installation because the DeepSeek Harness release-candidate packages expose their runtime composition through peer dependencies and npm 10 can fail while resolving the complete optional peer graph. The lockfile and explicit development peers make the standalone checks reproducible:
+
+```sh
+npm ci
+npm run check
+```
+
+`npm run check` runs standalone typecheck, package tests, both ESM builds, and `publint`. The package's own Vitest config keeps test discovery inside this repository even when the checkout is nested under DeepSeek Harness.
 
 ## Known Limitations and Deferred Work
 

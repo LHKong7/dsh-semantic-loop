@@ -6,7 +6,7 @@
 
 DeepSeek Harness 的可安装 semantic agent loop。本包导出 profile Bundle、完整的「语义模式」agent preset、loop 插件及其 invariant companion。安装 Bundle 后即可发现该 preset，无需把文件复制到 `dsh` CLI 包中。插件在所属 Session log 中保存有界的全量状态检查点，保留带版本的中间 artifact，暴露可信 capability gap，限制结构性停滞 revision，运行独立 verifier provider，修复过早停止，并且只在存在当前 passing verification receipt 时提交最终答案。它组合现有 Agent、Tool、System Prompt、Session 与 Cordis event 扩展点；不会修改 `@deepseek-ai/dsh-agent-loop`。
 
-本包是实验性的 semantic-workflow MVP。conversation model 通过类型化工具编写每个检查点，插件则在局部 observation 之间保持稳定的 goal contract 与带版本的全局 plan。后续可由独立 observation compiler 与 verifier 替代模型编写 claim 的角色，而无需改变领域无关的 plan 词汇。
+本包是实验性的 semantic-workflow MVP。conversation model 通过类型化工具编写每个检查点，插件则在局部 observation 之间保持稳定的 goal contract 与带版本的全局 plan。领域无关的 plan 词汇允许独立 observation compiler 或 verifier 替代模型编写 claim，而无需改变 checkpoint 协议。
 
 ## 配置
 
@@ -124,6 +124,17 @@ Before semantic_finish succeeds, emit tool calls without accompanying ordinary a
 #### KV Cache 影响
 
 只要插件 generation 与 config 不变，system prefix 与 tool schema 就保持稳定。检查点、tool result 与修复消息追加在可复用 prefix 之后。较新的检查点不会改写较早请求的字节。
+
+## 开发
+
+仓库的 `.npmrc` 会启用 legacy peer installation，因为 DeepSeek Harness release-candidate package 通过 peer dependency 暴露其 runtime composition，而 npm 10 在解析完整 optional peer graph 时可能失败。Lockfile 与显式 development peer 让独立检查可以复现：
+
+```sh
+npm ci
+npm run check
+```
+
+`npm run check` 会运行独立 typecheck、package test、两个 ESM build 与 `publint`。本包自己的 Vitest config 会把 test discovery 限制在当前仓库内，即使 checkout 嵌套在 DeepSeek Harness 下也是如此。
 
 ## 已知限制与后续工作
 
