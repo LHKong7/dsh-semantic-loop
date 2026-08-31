@@ -3,8 +3,9 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CallId, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { FINISH_TOOL, PLUGIN, STATE_TOOL, VERIFY_TOOL, isSemanticToolName, latestEnvironmentResultSeq } from './protocol.ts'
-import { foldSemanticStatePosition, semanticEvidenceCallIds, semanticStateOf } from './state.ts'
+import { CAPABILITIES_TOOL, FINISH_TOOL, PLUGIN, STATE_TOOL, VERIFY_TOOL, isSemanticToolName, latestEnvironmentResultSeq } from './protocol.ts'
+import { semanticProgressTimeline } from './progress.ts'
+import { foldSemanticStateHistory, foldSemanticStatePosition, semanticEvidenceCallIds, semanticStateOf } from './state.ts'
 import { foldSemanticVerificationPosition, semanticCheckpointHash } from './verification.ts'
 import type {
   SemanticCompletion,
@@ -218,10 +219,12 @@ export function semanticTelemetryOf(agent: Agent): SemanticTelemetry {
       if (message.source.kind === 'semantic-verification') verificationMessages.set(message.id, message)
     }
   }
+  const progress = semanticProgressTimeline(foldSemanticStateHistory(events, agent.id))
   return {
     checkpointRevisions: state?.revision ?? 0,
     semanticToolCalls: calls.filter(event => isSemanticToolName(event.data.name)).length,
     stateReads: calls.filter(event => event.data.name === STATE_TOOL).length,
+    capabilityReads: calls.filter(event => event.data.name === CAPABILITIES_TOOL).length,
     environmentToolCalls: calls.filter(event => !isSemanticToolName(event.data.name)).length,
     successfulEnvironmentToolCalls,
     finishAttempts: calls.filter(event => event.data.name === FINISH_TOOL).length,
@@ -229,6 +232,9 @@ export function semanticTelemetryOf(agent: Agent): SemanticTelemetry {
     verificationReceipts: verificationMessages.size,
     passedVerifications: [...verificationMessages.values()].filter(message =>
       message.source.kind === 'semantic-verification' && message.source.receipt.verdict === 'passed').length,
+    materialProgressRevisions: progress.filter(item => item.materialChanges.length > 0).length,
+    stagnantCheckpointRevisions: progress.filter(item => item.materialChanges.length === 0).length,
+    currentStagnationStreak: progress.at(-1)?.stagnantRevisions ?? 0,
     acceptedFinishResults: finishApprovals(events).length,
     repairSteps: events.filter(event => event.type === 'user/message'
       && event.data.source.kind === 'plugin' && event.data.source.plugin === PLUGIN).length,

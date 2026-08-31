@@ -8,8 +8,10 @@ import { CallId, type MessageId, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { VERIFY_TOOL, latestEnvironmentResultSeq } from './protocol.ts'
+import { requiredSemanticCapabilities } from './capabilities.ts'
 import { foldSemanticStatePosition } from './state.ts'
 import type {
+  SemanticCapabilityInventory,
   SemanticCheckpoint,
   SemanticVerificationCheck,
   SemanticEvidence,
@@ -70,6 +72,21 @@ export function builtinSemanticVerification(
     status: 'proved',
     detail: `proved for semantic checkpoint r${request.revision}`,
   })
+  const available = new Map(request.capabilities.available.map(capability => [capability.id, capability]))
+  const capabilityChecks: SemanticVerificationCheck[] = requiredSemanticCapabilities(request.checkpoint).map((id) => {
+    const capability = available.get(id)
+    return {
+      id: `capability-${id}`,
+      kind: 'runtime.capability-availability',
+      description: `The plan's required "${id}" capability has a trusted runtime provider.`,
+      issuer: 'system',
+      required: true,
+      status: capability === undefined ? 'unknown' : 'proved',
+      detail: capability === undefined
+        ? `no provider declared semantic capability "${id}"`
+        : `provided by ${capability.providerIds.join(', ')}`,
+    }
+  })
   return {
     verifierId: 'semantic-runtime',
     specVersion: '1',
@@ -79,6 +96,7 @@ export function builtinSemanticVerification(
       proved('plan-graph', 'runtime.plan-graph', 'The versioned global plan is acyclic and its data dependencies are complete.'),
       proved('artifact-lineage', 'runtime.artifact-lineage', 'Required outputs are current and every artifact lineage reference is valid.'),
       proved('evidence-correlation', 'runtime.evidence-correlation', 'Every cited tool result exists earlier in the durable Session log.'),
+      ...capabilityChecks,
     ],
     proofDigest: null,
   }
@@ -105,6 +123,7 @@ export function semanticVerificationVerdict(
  * @param revision Exact checkpoint revision.
  * @param checkpoint Canonical checkpoint value.
  * @param evidence Cited successful environment-tool results.
+ * @param capabilities Agent-scoped capability inventory resolved for this attempt.
  * @returns Verifier-authored receipt bound to the Session and checkpoint digest.
  */
 export async function verifySemanticCheckpoint(
@@ -113,6 +132,7 @@ export async function verifySemanticCheckpoint(
   revision: number,
   checkpoint: SemanticCheckpoint,
   evidence: readonly SemanticEvidence[],
+  capabilities: SemanticCapabilityInventory,
 ): Promise<SemanticVerificationReceipt> {
   const request: SemanticVerificationRequest = {
     sessionId: agent.id,
@@ -120,6 +140,7 @@ export async function verifySemanticCheckpoint(
     checkpointHash: semanticCheckpointHash(checkpoint),
     checkpoint,
     evidence,
+    capabilities,
   }
   const providerReports = await ctx.waterfall(
     scopeTarget(agent, agent),

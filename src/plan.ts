@@ -37,6 +37,9 @@ export function assertSemanticPlan(plan: SemanticPlan): void {
     assertUniqueStrings(node.dependsOn, `semantic plan node "${node.id}" dependencies`)
     assertUniqueStrings(node.inputArtifactIds, `semantic plan node "${node.id}" input artifacts`)
     assertUniqueStrings(node.requiredCapabilities, `semantic plan node "${node.id}" required capabilities`)
+    for (const capability of node.requiredCapabilities) {
+      assertSemanticId(capability, `semantic plan node "${node.id}" required capability`)
+    }
     assertSemanticId(node.outputArtifactId, `semantic plan node "${node.id}" output artifact id`)
     for (const inputId of node.inputArtifactIds) {
       assertSemanticId(inputId, `semantic plan node "${node.id}" input artifact id`)

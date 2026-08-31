@@ -41,6 +41,18 @@
   name: 'dsh-semantic-loop'
   config:
     maxRepairSteps: 3
+    maxStagnantRevisions: 3
+    capabilities:
+      - id: shell-execution
+        description: Run bounded shell commands through the preset's sandboxed shell tool.
+      - id: filesystem-operations
+        description: Read, inspect, and modify workspace files through filesystem tools.
+      - id: code-search
+        description: Search workspace paths and source text through filesystem search.
+      - id: background-jobs
+        description: Collect and stop background work started by supported tools.
+      - id: skill-discovery
+        description: Discover and load agent skills registered for this preset.
 
 # ── shell ───────────────────────────────────────────────────────────────────
 

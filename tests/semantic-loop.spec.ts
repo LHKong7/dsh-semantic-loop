@@ -89,11 +89,18 @@ async function setup(
   maxRepairSteps = 3,
   requireToolEvidence = false,
   maxCheckpointBytes = 65_536,
+  maxStagnantRevisions = 3,
 ) {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(AgentLoop, { agents: [] })
-  const fiber = await ctx.plugin(SemanticLoop, { maxRepairSteps, requireToolEvidence, maxCheckpointBytes })
+  const fiber = await ctx.plugin(SemanticLoop, {
+    maxRepairSteps,
+    requireToolEvidence,
+    maxCheckpointBytes,
+    maxStagnantRevisions,
+    capabilities: [{ id: 'structured-query', description: 'Query structured data sources.' }],
+  })
   const adapter = new MockAdapter(script)
   ctx.llm.registerAdapter(['mock'], adapter)
   const agent = ctx.agentLoop.create(SessionId(`semantic-${++callNumber}`), { provider: 'mock', model: 'mock' })
@@ -211,7 +218,7 @@ describe('semantic loop', () => {
     const unverified = await execute(ctx, agent, 'semantic_finish', { expected_revision: 2, answer: '42' })
     expect(resultText(unverified)).toContain('requires a current verification receipt')
     const verification = await execute(ctx, agent, 'semantic_verify', { expected_revision: 2 })
-    expect(verification.value).toMatchObject({ verdict: 'passed', requiredChecks: 4, provedRequiredChecks: 4 })
+    expect(verification.value).toMatchObject({ verdict: 'passed', requiredChecks: 5, provedRequiredChecks: 5 })
     const complete = await execute(ctx, agent, 'semantic_finish', { expected_revision: 2, answer: '  42  ' })
     expect(complete.isError).toBe(false)
     expect(complete.concludesTurn).toBeUndefined()
@@ -245,7 +252,7 @@ describe('semantic loop', () => {
     ])
     await execute(blocked.ctx, blocked.agent, 'semantic_checkpoint', ready)
     const failed = await execute(blocked.ctx, blocked.agent, 'semantic_verify', { expected_revision: 1 })
-    expect(failed.value).toMatchObject({ verdict: 'failed', requiredChecks: 5, provedRequiredChecks: 4 })
+    expect(failed.value).toMatchObject({ verdict: 'failed', requiredChecks: 6, provedRequiredChecks: 5 })
     expect(SemanticLoop.semanticVerificationOf(blocked.agent)).toMatchObject({ verdict: 'failed', revision: 1 })
     const finish = await execute(blocked.ctx, blocked.agent, 'semantic_finish', { expected_revision: 1, answer: '42' })
     expect(resultText(finish)).toContain('current verdict is failed')
@@ -274,6 +281,86 @@ describe('semantic loop', () => {
     expect(rejected.isError).toBe(true)
     expect(resultText(rejected)).toContain('agent-issued semantic verification check')
     expect(SemanticLoop.semanticVerificationOf(untrusted.agent)).toBeUndefined()
+  })
+
+  it('reports missing plan capabilities and lets a scoped provider satisfy them', async () => {
+    const { ctx, agent } = await setup()
+    const capabilityReady = {
+      ...ready,
+      plan: {
+        ...ready.plan,
+        nodes: [{
+          ...ready.plan.nodes[0],
+          required_capabilities: ['structured-query', 'semantic-entity-extraction'],
+        }],
+      },
+    }
+    await execute(ctx, agent, 'semantic_checkpoint', capabilityReady)
+    const inspection = await execute(ctx, agent, 'semantic_capabilities', {})
+    expect(inspection.value).toEqual({
+      providers: 1,
+      available: ['structured-query'],
+      required: ['structured-query', 'semantic-entity-extraction'],
+      missing: ['semantic-entity-extraction'],
+    })
+    const unknown = await execute(ctx, agent, 'semantic_verify', { expected_revision: 1 })
+    expect(unknown.value).toMatchObject({ verdict: 'unknown', requiredChecks: 6, provedRequiredChecks: 5 })
+    expect(resultText(await execute(ctx, agent, 'semantic_finish', {
+      expected_revision: 1,
+      answer: '42',
+    }))).toContain('current verdict is unknown')
+
+    agent.ctx.on('semantic/capabilities', async (_request, next) => [
+      ...await next(),
+      {
+        providerId: 'entity-runtime',
+        specVersion: '1',
+        capabilities: [{
+          id: 'semantic-entity-extraction',
+          description: 'Extract typed entities from unstructured text.',
+        }],
+      },
+    ])
+    const available = await execute(ctx, agent, 'semantic_verify', { expected_revision: 1 })
+    expect(available.value).toMatchObject({ verdict: 'passed', requiredChecks: 6, provedRequiredChecks: 6 })
+    expect(() => SemanticLoop.resolveConfiguredCapabilities([{
+      id: 'Semantic-NER',
+      description: 'Invalid capability id.',
+    }])).toThrow(/must be lower-kebab-case/)
+  })
+
+  it('bounds no-progress checkpoint revisions and accepts a material replan', async () => {
+    const { ctx, agent } = await setup([], 3, false, 65_536, 1)
+    const first = await execute(ctx, agent, 'semantic_checkpoint', exploring)
+    expect(first.value).toMatchObject({ materialProgress: true, stagnantRevisions: 0 })
+    const stagnant = await execute(ctx, agent, 'semantic_checkpoint', { ...exploring, expected_revision: 1 })
+    expect(stagnant.value).toMatchObject({ materialProgress: false, progressSignals: 0, stagnantRevisions: 1 })
+    const rejected = await execute(ctx, agent, 'semantic_checkpoint', { ...exploring, expected_revision: 2 })
+    expect(rejected.isError).toBe(true)
+    expect(resultText(rejected)).toContain('exceeds maxStagnantRevisions: 2 > 1')
+    expect(SemanticLoop.semanticStateOf(agent)?.revision).toBe(2)
+
+    const revised = await execute(ctx, agent, 'semantic_checkpoint', {
+      ...exploring,
+      expected_revision: 2,
+      plan: {
+        revision: 2,
+        change_reason: 'use a bounded structured query before any fallback',
+        nodes: [{ ...exploring.plan.nodes[0], description: 'Run one bounded structured query' }],
+      },
+    })
+    expect(revised.value).toMatchObject({ materialProgress: true, stagnantRevisions: 0 })
+    expect(SemanticLoop.semanticProgressOf(agent)).toMatchObject({
+      revision: 3,
+      materialChanges: ['plan-revised:2'],
+      stagnantRevisions: 0,
+    })
+    expect(SemanticLoop.semanticTelemetryOf(agent)).toMatchObject({
+      checkpointRevisions: 3,
+      materialProgressRevisions: 2,
+      stagnantCheckpointRevisions: 1,
+      currentStagnationStreak: 0,
+    })
   })
 
   it.each([false, true])('requires a checkpoint after a later environment result (error=%s)', async (isError) => {
@@ -437,12 +524,16 @@ describe('semantic loop', () => {
       checkpointRevisions: 0,
       semanticToolCalls: 0,
       stateReads: 0,
+      capabilityReads: 0,
       environmentToolCalls: 0,
       successfulEnvironmentToolCalls: 0,
       finishAttempts: 0,
       verificationAttempts: 0,
       verificationReceipts: 0,
       passedVerifications: 0,
+      materialProgressRevisions: 0,
+      stagnantCheckpointRevisions: 0,
+      currentStagnationStreak: 0,
       acceptedFinishResults: 0,
       repairSteps: 0,
       evidenceToolResults: 0,
@@ -590,6 +681,10 @@ describe('semantic loop', () => {
     await expect(setup([], 3, false, 0)).rejects.toThrow(/maxCheckpointBytes expected number >= 1/)
   })
 
+  it('fails loud on an invalid stagnation limit', async () => {
+    await expect(setup([], 3, false, 65_536, -1)).rejects.toThrow(/maxStagnantRevisions expected number >= 0/)
+  })
+
   it('presents every semantic control as a pure generic card', async () => {
     const { ctx } = await setup()
     expect(ctx.tools.get('semantic_checkpoint')?.presentCall?.(exploring)).toEqual({
@@ -603,6 +698,9 @@ describe('semantic loop', () => {
     })
     expect(ctx.tools.get('semantic_verify')?.presentCall?.({ expected_revision: 1 })).toEqual({
       card: 'generic', title: 'Verify semantic state', kind: 'other', rawInput: { expected_revision: 1 },
+    })
+    expect(ctx.tools.get('semantic_capabilities')?.presentCall?.({})).toEqual({
+      card: 'generic', title: 'Inspect semantic capabilities', kind: 'other', rawInput: {},
     })
   })
 

@@ -817,6 +817,7 @@ export function renderSemanticCheckpointReceipt(state: SemanticState): string {
 interface SemanticFoldState {
   readonly messages: Map<MessageId, UserMessage>
   readonly revisions: Map<SessionId, Map<number, MessageId>>
+  readonly histories: Map<SessionId, SemanticState[]>
   readonly latest: Map<SessionId, SemanticState>
   readonly latestPositions: Map<SessionId, SemanticStatePosition>
   readonly calls: Map<CallId, { readonly name: string; readonly turn: number }>
@@ -905,6 +906,12 @@ function applySemanticMessage(state: SemanticFoldState, message: UserMessage): v
   state.messages.set(message.id, message)
   state.checkpointCallOwners.set(source.checkpointCallId, { sessionId: source.sessionId, messageId: message.id })
   revisions.set(source.revision, message.id)
+  let history = state.histories.get(source.sessionId)
+  if (history === undefined) {
+    history = []
+    state.histories.set(source.sessionId, history)
+  }
+  history.push(semanticState)
   state.latest.set(source.sessionId, semanticState)
   state.latestPositions.set(source.sessionId, { state: semanticState, checkpointCallSeq: checkpointCall.callSeq })
 }
@@ -939,11 +946,12 @@ function applyProtocolEvent(state: SemanticFoldState, event: SessionEvent): void
   }
 }
 
-/** Strictly replay semantic states and their checkpoint-call positions. */
-function foldSemanticStatePositions(events: readonly SessionEvent[]): ReadonlyMap<SessionId, SemanticStatePosition> {
+/** Strictly replay every semantic checkpoint stream and correlation relation. */
+function replaySemanticStates(events: readonly SessionEvent[]): SemanticFoldState {
   const state: SemanticFoldState = {
     messages: new Map(),
     revisions: new Map(),
+    histories: new Map(),
     latest: new Map(),
     latestPositions: new Map(),
     calls: new Map(),
@@ -957,7 +965,7 @@ function foldSemanticStatePositions(events: readonly SessionEvent[]): ReadonlyMa
     applyProtocolEvent(state, event)
     for (const message of semanticMessages(event)) applySemanticMessage(state, message)
   }
-  return state.latestPositions
+  return state
 }
 
 /**
@@ -971,7 +979,7 @@ export function foldSemanticStatePosition(
   events: readonly SessionEvent[],
   sessionId: SessionId,
 ): SemanticStatePosition | undefined {
-  return foldSemanticStatePositions(events).get(sessionId)
+  return replaySemanticStates(events).latestPositions.get(sessionId)
 }
 
 /**
@@ -981,7 +989,20 @@ export function foldSemanticStatePosition(
  * @returns Latest checkpoint for each owning Session identity.
  */
 export function foldSemanticStates(events: readonly SessionEvent[]): ReadonlyMap<SessionId, SemanticState> {
-  return new Map([...foldSemanticStatePositions(events)].map(([sessionId, position]) => [sessionId, position.state]))
+  return new Map(replaySemanticStates(events).latest)
+}
+
+/**
+ * Strictly replay one owner stream and retain every canonical checkpoint.
+ * @param events Durable Session events in sequence order.
+ * @param sessionId Identity whose checkpoint history is requested.
+ * @returns Contiguous owner-scoped states in revision order.
+ */
+export function foldSemanticStateHistory(
+  events: readonly SessionEvent[],
+  sessionId: SessionId,
+): readonly SemanticState[] {
+  return [...(replaySemanticStates(events).histories.get(sessionId) ?? [])]
 }
 
 /**

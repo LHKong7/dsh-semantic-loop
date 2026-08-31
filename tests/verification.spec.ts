@@ -14,6 +14,18 @@ import {
 const OWNER = SessionId('verification-owner')
 const checkpointCallId = CallId('checkpoint-1')
 const verificationCallId = CallId('verification-1')
+const capabilities = {
+  reports: [{
+    providerId: 'test-runtime',
+    specVersion: '1',
+    capabilities: [{ id: 'structured-query', description: 'Query structured data sources.' }],
+  }],
+  available: [{
+    id: 'structured-query',
+    description: 'Query structured data sources.',
+    providerIds: ['test-runtime'],
+  }],
+} as const
 
 const checkpoint: SemanticCheckpoint = {
   goal: { id: 'verify-answer', version: 1, statement: 'Verify the answer', constraints: [] },
@@ -110,6 +122,7 @@ function receipt(): SemanticVerificationReceipt {
     checkpointHash: semanticCheckpointHash(checkpoint),
     checkpoint,
     evidence: [],
+    capabilities,
   }
   const reports = [builtinSemanticVerification(request)]
   return {
@@ -175,6 +188,7 @@ describe('semantic verification receipts', () => {
       checkpointHash: semanticCheckpointHash(checkpoint),
       checkpoint,
       evidence: [],
+      capabilities,
     })
     expect(semanticVerificationVerdict([{ ...report, checks: [
       { ...report.checks[0]!, required: false, status: 'violated' },

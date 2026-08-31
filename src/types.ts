@@ -79,6 +79,44 @@ export interface SemanticArtifact extends SemanticArtifactRef {
 /** Whether an artifact is still usable under the latest plan and input versions. */
 export type SemanticArtifactStatus = 'current' | 'stale'
 
+/** Domain-neutral capability that an execution provider makes available. */
+export interface SemanticCapability {
+  /** Stable lower-kebab-case identity referenced by plan nodes. */
+  readonly id: string
+  /** Concrete operation or reliability property supplied by the provider. */
+  readonly description: string
+}
+
+/** Capabilities contributed by one trusted runtime provider. */
+export interface SemanticCapabilityReport {
+  /** Stable provider identity. */
+  readonly providerId: string
+  /** Version of the provider's capability declarations. */
+  readonly specVersion: string
+  /** Capabilities currently available to the owning Agent. */
+  readonly capabilities: readonly SemanticCapability[]
+}
+
+/** One capability aggregated across providers with an identical declaration. */
+export interface SemanticCapabilityAvailability extends SemanticCapability {
+  /** Providers that can currently supply the capability. */
+  readonly providerIds: readonly string[]
+}
+
+/** Agent-scoped capability inventory resolved at inspection or verification time. */
+export interface SemanticCapabilityInventory {
+  /** Validated provider reports in dispatch order. */
+  readonly reports: readonly SemanticCapabilityReport[]
+  /** Available capabilities in first-provider declaration order. */
+  readonly available: readonly SemanticCapabilityAvailability[]
+}
+
+/** Immutable input passed to a scoped capability provider. */
+export interface SemanticCapabilityRequest {
+  /** Session whose execution capabilities are being resolved. */
+  readonly sessionId: SessionId
+}
+
 /** Trust origin of one verifier-defined obligation. */
 export type SemanticObligationIssuer = 'system' | 'task' | 'policy' | 'agent'
 
@@ -126,6 +164,8 @@ export interface SemanticVerificationRequest {
   readonly checkpoint: SemanticCheckpoint
   /** Successful environment-tool results cited by checkpoint claims. */
   readonly evidence: readonly SemanticEvidence[]
+  /** Agent-scoped execution capabilities available at verification time. */
+  readonly capabilities: SemanticCapabilityInventory
 }
 
 /** Durable aggregate bound to one exact semantic checkpoint. */
@@ -220,6 +260,16 @@ export interface SemanticState {
   readonly checkpoint: SemanticCheckpoint
 }
 
+/** Material task progress derived from one checkpoint transition. */
+export interface SemanticProgress {
+  /** Checkpoint revision being classified. */
+  readonly revision: number
+  /** Stable machine-readable changes that advance or revise semantic work. */
+  readonly materialChanges: readonly string[]
+  /** Consecutive accepted revisions with no material change, ending here. */
+  readonly stagnantRevisions: number
+}
+
 /** One successful environment-tool observation cited by the latest checkpoint. */
 export interface SemanticEvidence {
   /** Durable correlation identity of the environment-tool call and result. */
@@ -254,6 +304,8 @@ export interface SemanticTelemetry {
   readonly semanticToolCalls: number
   /** Calls that materialize the complete checkpoint for resume or compaction recovery. */
   readonly stateReads: number
+  /** Calls that inspect agent-scoped semantic capabilities. */
+  readonly capabilityReads: number
   /** Top-level calls to tools outside the semantic protocol. */
   readonly environmentToolCalls: number
   /** Successful top-level calls outside the semantic protocol. */
@@ -266,6 +318,12 @@ export interface SemanticTelemetry {
   readonly verificationReceipts: number
   /** Durable verification receipts whose required obligations all passed. */
   readonly passedVerifications: number
+  /** Accepted checkpoint revisions that contain at least one material change. */
+  readonly materialProgressRevisions: number
+  /** Accepted checkpoint revisions that contain no material change. */
+  readonly stagnantCheckpointRevisions: number
+  /** Consecutive no-progress revisions at the latest checkpoint. */
+  readonly currentStagnationStreak: number
   /** Successful `semantic_finish` results, including approvals later invalidated. */
   readonly acceptedFinishResults: number
   /** Stopping-boundary corrective messages committed to the model transcript. */
