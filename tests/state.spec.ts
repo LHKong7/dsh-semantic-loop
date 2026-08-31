@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { CallId, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SemanticCheckpoint } from '../src/types.ts'
+import { assertSemanticTransition } from '../src/plan.ts'
 import {
   decodeSemanticCheckpointSource,
   foldSemanticState,
@@ -14,7 +15,12 @@ import {
 } from '../src/state.ts'
 
 const ready: SemanticCheckpoint = {
-  objective: 'Answer the database question',
+  goal: {
+    id: 'answer-database-question',
+    version: 1,
+    statement: 'Answer the database question',
+    constraints: ['Use the query result as evidence'],
+  },
   criteria: [{
     id: 'answer-supported',
     description: 'The answer follows from query output',
@@ -22,6 +28,18 @@ const ready: SemanticCheckpoint = {
     evidence: 'query q1 returned 42',
     evidenceCallIds: [],
   }],
+  plan: {
+    revision: 1,
+    changeReason: 'initial-plan',
+    nodes: [{
+      id: 'query-answer',
+      operation: 'query-structured-source',
+      description: 'Query the source needed to answer the question',
+      dependsOn: [],
+      requiredCapabilities: ['structured-query'],
+    }],
+  },
+  activeNodeId: null,
   facts: [{ id: 'query-result', statement: 'The result is 42', evidence: 'query q1 row 1', evidenceCallIds: [] }],
   observedCallIds: [],
   gaps: [],
@@ -34,7 +52,7 @@ const OWNER = SessionId('semantic-owner')
 function checkpointSource(checkpoint: unknown = ready, overrides: Record<string, unknown> = {}): unknown {
   return {
     kind: 'semantic-checkpoint',
-    version: 4,
+    version: 5,
     sessionId: OWNER,
     checkpointCallId: CallId('semantic-checkpoint-1'),
     revision: 1,
@@ -46,7 +64,7 @@ function checkpointSource(checkpoint: unknown = ready, overrides: Record<string,
 function checkpointArguments(revision: number, checkpoint: SemanticCheckpoint): Record<string, unknown> {
   return {
     expected_revision: revision - 1,
-    objective: checkpoint.objective,
+    goal: checkpoint.goal,
     criteria: checkpoint.criteria.map(criterion => ({
       id: criterion.id,
       description: criterion.description,
@@ -54,6 +72,18 @@ function checkpointArguments(revision: number, checkpoint: SemanticCheckpoint): 
       evidence: criterion.evidence,
       evidence_call_ids: criterion.evidenceCallIds,
     })),
+    plan: {
+      revision: checkpoint.plan.revision,
+      change_reason: checkpoint.plan.changeReason,
+      nodes: checkpoint.plan.nodes.map(node => ({
+        id: node.id,
+        operation: node.operation,
+        description: node.description,
+        depends_on: node.dependsOn,
+        required_capabilities: node.requiredCapabilities,
+      })),
+    },
+    active_node_id: checkpoint.activeNodeId,
     facts: checkpoint.facts.map(fact => ({
       id: fact.id,
       statement: fact.statement,
@@ -74,7 +104,7 @@ function checkpointEvent(
 ): SessionEvent {
   const state = { revision, checkpoint }
   const message = createUserMessage({
-    source: { kind: 'semantic-checkpoint', version: 4, sessionId: OWNER, checkpointCallId: callId, revision, checkpoint },
+    source: { kind: 'semantic-checkpoint', version: 5, sessionId: OWNER, checkpointCallId: callId, revision, checkpoint },
     content: [{ type: 'text', text: renderSemanticCheckpointReceipt(state) }],
   })
   return {
@@ -120,10 +150,75 @@ function checkpointTransaction(
 }
 
 describe('semantic checkpoint state', () => {
+  it('rejects missing plan dependencies and dependency cycles', () => {
+    const missingDependency = {
+      ...ready,
+      plan: {
+        ...ready.plan,
+        nodes: [{ ...ready.plan.nodes[0]!, dependsOn: ['missing-node'] }],
+      },
+    }
+    expect(() => resolveSemanticCheckpoint(missingDependency)).toThrow(/depends on missing node/)
+
+    const cycle = {
+      ...ready,
+      plan: {
+        ...ready.plan,
+        nodes: [
+          { ...ready.plan.nodes[0]!, dependsOn: ['format-answer'] },
+          {
+            id: 'format-answer',
+            operation: 'format-answer',
+            description: 'Format the answer',
+            dependsOn: ['query-answer'],
+            requiredCapabilities: [],
+          },
+        ],
+      },
+    }
+    expect(() => resolveSemanticCheckpoint(cycle)).toThrow(/dependency cycle/)
+  })
+
+  it('keeps one goal contract stable and versions deliberate plan replacement', () => {
+    assertSemanticTransition(undefined, ready)
+    const changedPlan: SemanticCheckpoint = {
+      ...ready,
+      plan: {
+        revision: 2,
+        changeReason: 'validate the query before formatting',
+        nodes: [
+          ...ready.plan.nodes,
+          {
+            id: 'validate-answer',
+            operation: 'validate-result',
+            description: 'Validate the query result',
+            dependsOn: ['query-answer'],
+            requiredCapabilities: ['result-validation'],
+          },
+        ],
+      },
+    }
+    expect(() => assertSemanticTransition(ready, changedPlan)).not.toThrow()
+    expect(() => assertSemanticTransition(ready, {
+      ...changedPlan,
+      plan: { ...changedPlan.plan, revision: 1 },
+    })).toThrow(/plan revision must be 2/)
+    expect(() => assertSemanticTransition(ready, {
+      ...ready,
+      goal: { ...ready.goal, statement: 'Silently changed task' },
+    })).toThrow(/changed without a new goal id and version/)
+    expect(() => assertSemanticTransition(ready, {
+      ...ready,
+      criteria: [{ ...ready.criteria[0]!, description: 'Silently changed success condition' }],
+    })).toThrow(/changed its completion criteria/)
+  })
+
   it('canonicalizes model input and renders a whole superseding snapshot', () => {
     const checkpoint = resolveSemanticCheckpoint({
-      objective: '  Answer the database question  ',
+      goal: { ...ready.goal, statement: '  Answer the database question  ' },
       criteria: [{ ...ready.criteria[0]!, description: '  The answer follows from query output  ' }],
+      plan: ready.plan,
+      activeNodeId: ready.activeNodeId,
       facts: [{ ...ready.facts[0]!, evidence: '  query q1 row 1  ' }],
       gaps: [],
       nextAction: '  Call semantic_finish with the supported answer  ',
@@ -137,8 +232,10 @@ describe('semantic checkpoint state', () => {
 
   it('renders empty and open exploring collections explicitly', () => {
     const empty: SemanticCheckpoint = {
-      objective: 'Explore the question',
+      goal: { id: 'explore-question', version: 1, statement: 'Explore the question', constraints: [] },
       criteria: [],
+      plan: { revision: 1, changeReason: 'initial-plan', nodes: [] },
+      activeNodeId: null,
       facts: [],
       observedCallIds: [],
       gaps: [],
@@ -175,7 +272,7 @@ describe('semantic checkpoint state', () => {
     [null, /must be an object/],
     [[], /must be an object/],
     [{ ...checkpointSource() as object, extra: true }, /fields must be exactly/],
-    [{ kind: 'semantic-checkpoint', version: 4, sessionId: OWNER, revision: 1 }, /fields must be exactly/],
+    [{ kind: 'semantic-checkpoint', version: 5, sessionId: OWNER, revision: 1 }, /fields must be exactly/],
     [checkpointSource(ready, { kind: 'other' }), /invalid kind/],
     [checkpointSource(ready, { version: 3 }), /unsupported version/],
     [checkpointSource(ready, { sessionId: '' }), /sessionId must be non-empty/],
@@ -185,8 +282,8 @@ describe('semantic checkpoint state', () => {
     [checkpointSource(ready, { revision: 0 }), /revision must be a positive safe integer/],
     [checkpointSource(ready, { revision: '1' }), /revision must be a positive safe integer/],
     [checkpointSource({ ...ready, status: 'done' }), /status must be exploring or ready/],
-    [checkpointSource({ ...ready, objective: '' }), /objective must be non-empty/],
-    [checkpointSource({ ...ready, objective: ' padded ' }), /objective must be non-empty/],
+    [checkpointSource({ ...ready, goal: { ...ready.goal, statement: '' } }), /goal statement must be non-empty/],
+    [checkpointSource({ ...ready, goal: { ...ready.goal, statement: ' padded ' } }), /goal statement must be non-empty/],
     [checkpointSource({ ...ready, criteria: 'invalid' }), /semantic criteria must be an array/],
     [checkpointSource({ ...ready, criteria: [null] }), /semantic criterion 0 must be an object/],
     [checkpointSource({ ...ready, criteria: [{ ...ready.criteria[0]!, extra: true }] }), /fields must be exactly/],
@@ -258,11 +355,11 @@ describe('semantic checkpoint state', () => {
     const mismatch = checkpointTransaction(1, ready)
     const insertion = mismatch[2]
     if (insertion?.type !== 'agent/inbox/spliced') throw new Error('expected inbox event')
-    const changedCheckpoint = { ...ready, objective: 'A forged objective' }
+    const changedCheckpoint = { ...ready, goal: { ...ready.goal, statement: 'A forged objective' } }
     const changedMessage = createUserMessage({
       source: {
         kind: 'semantic-checkpoint',
-        version: 4,
+        version: 5,
         sessionId: OWNER,
         checkpointCallId: CallId('semantic-checkpoint-1'),
         revision: 1,
@@ -360,7 +457,7 @@ describe('semantic checkpoint state', () => {
     const insertion = events.at(-1)!
     if (insertion.type !== 'agent/inbox/spliced') throw new Error('expected inbox event')
     const original = insertion.data.inserted[0]!
-    const changedCheckpoint = { ...ready, objective: 'A changed objective' }
+    const changedCheckpoint = { ...ready, goal: { ...ready.goal, statement: 'A changed objective' } }
     const changedMessage = {
       ...original,
       source: { ...original.source, checkpoint: changedCheckpoint },

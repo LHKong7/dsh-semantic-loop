@@ -6,7 +6,7 @@
 
 DeepSeek Harness 的可安装 semantic agent loop。本包导出 profile Bundle、完整的「语义模式」agent preset、loop 插件及其 invariant companion。安装 Bundle 后即可发现该 preset，无需把文件复制到 `dsh` CLI 包中。插件在所属 Session log 中保存有界的全量状态检查点，插入精简的模型可见提交回执，通过按需恢复工具提供完整状态，修复过早停止，并且只允许通过 ready 状态的完成工具提交最终答案。它组合现有 Agent、Tool、System Prompt 与 Session 扩展点；不会修改 `@deepseek-ai/dsh-agent-loop`。
 
-本包是实验性的 semantic-scratchpad MVP。conversation model 通过类型化工具编写每个检查点。后续可由独立 observation compiler 与 benchmark 专用 verifier 替代该编写角色，而无需改变持久检查点词汇。
+本包是实验性的 semantic-workflow MVP。conversation model 通过类型化工具编写每个检查点，插件则在局部 observation 之间保持稳定的 goal contract 与带版本的全局 plan。后续可由独立 observation compiler 与 verifier 替代模型编写 claim 的角色，而无需改变领域无关的 plan 词汇。
 
 ## 配置
 
@@ -39,11 +39,13 @@ dsh --profile web
 
 ## 语义状态
 
-`semantic_checkpoint` 替换完整语义状态，并通过 `expected_revision` 执行 compare-and-set 更新。revision `0` 创建 revision `1`；之后每次调用都要给出最新的确切 revision。状态包含一个 objective、显式 completion criteria、有证据支持的 facts、open gaps、一个 next action，以及 `exploring` 或 `ready` status。集合 id 使用 lower-kebab-case，并且在各自集合内保持唯一。
+`semantic_checkpoint` 替换完整语义状态，并通过 `expected_revision` 执行 compare-and-set 更新。revision `0` 创建 revision `1`；之后每次调用都要给出最新的确切 revision。状态包含稳定的 goal contract、显式 completion criteria、带版本的全局 plan graph、一个 active plan node、有证据支持的 facts、open gaps、一个 next action，以及 `exploring` 或 `ready` status。集合 id 使用 lower-kebab-case，并且在各自集合内保持唯一。
+
+首个 goal 与 plan 的 version 均为 `1`，首个 plan 的 `change_reason` 为 `initial-plan`。goal id 不变时，其 statement、constraints 与 completion-criterion definition 必须保持稳定。修改 plan graph 时，`plan.revision` 必须恰好递增一次，并给出新的具体原因。替换任务时，必须使用新的 goal id、下一个 goal version，并从 plan revision `1` 重新开始。Plan node 描述语义 operation、dependency 与 required capability，而不是具体 tool 名。插件会拒绝缺失 dependency、重复 edge、cycle、静默 goal drift 及未做版本变更的 plan 替换。Ready checkpoint 不得保留 active plan node。
 
 `met` criterion 要求非空 evidence，`unmet` criterion 则携带空 evidence。`ready` 要求至少一个 criterion、所有 criterion 均为 `met`，且不存在 gap。每个 fact 也必须有 evidence。每个 criterion 与 fact 都有 `evidence_call_ids`：模型选择支持该 claim 的成功 environment-tool result，插件则对照更早的 Session log 验证每个 id。checkpoint 另行记录 `observedCallIds`，即当前 turn 中已经看到的全部成功 environment result。这样，无关的成功调用不会仅因发生在 checkpoint 之前就自动成为证据。
 
-该工具把 semantic-checkpoint user message 作为 result context 返回。Agent Loop 先提交 tool result，再把该 message 插入持久的 next-step inbox。其 version `4` source 保存完整规范检查点、所属 `SessionId`，以及编写该值的 `checkpointCallId`；其文本是精简的提交回执。回放要求该 id 指向更早成功的 `semantic_checkpoint` call/result，并根据持久 call argument 与调用时 observation 重新构造 checkpoint，拒绝任何差异。回放还会按 message id 去重之后出现的 `user/message`，要求 revision 连续，验证每条 claim reference，并在 fork 以新 Session id 启动时忽略继承而来的父级状态。同一 id 的 resume 会延续 revision 流。只有当 resume 或 compaction 隐藏了原始 checkpoint call 时，才使用 `semantic_state` 渲染最新完整快照；常规更新不应调用它。
+该工具把 semantic-checkpoint user message 作为 result context 返回。Agent Loop 先提交 tool result，再把该 message 插入持久的 next-step inbox。其 version `5` source 保存完整规范检查点、所属 `SessionId`，以及编写该值的 `checkpointCallId`；其文本是精简的提交回执。回放要求该 id 指向更早成功的 `semantic_checkpoint` call/result，并根据持久 call argument 与调用时 observation 重新构造 checkpoint，拒绝任何差异。回放还会按 message id 去重之后出现的 `user/message`，要求 revision 连续，验证每条 claim reference，并在 fork 以新 Session id 启动时忽略继承而来的父级状态。同一 id 的 resume 会延续 revision 流。只有当 resume 或 compaction 隐藏了原始 checkpoint call 时，才使用 `semantic_state` 渲染最新完整快照；常规更新不应调用它。
 
 ## 完成协议
 

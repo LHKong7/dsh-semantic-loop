@@ -6,6 +6,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView } from '@deepseek-ai/dsh-tools'
+import { assertSemanticTransition } from './plan.ts'
 import {
   CHECKPOINT_TOOL,
   FINISH_TOOL,
@@ -29,6 +30,7 @@ import type { SemanticCheckpointInput } from './state.ts'
 import type { SemanticState } from './types.ts'
 
 export type * from './types.ts'
+export { assertSemanticGoal, assertSemanticPlan, assertSemanticTransition } from './plan.ts'
 export {
   decodeSemanticCheckpointSource,
   foldSemanticState,
@@ -167,7 +169,7 @@ function repairText(state: SemanticState | undefined): string {
 /** Model policy for the semantic checkpoint protocol. */
 const POLICY = `This session uses the semantic agent loop. Maintain a concise semantic state of externally checkable commitments, not hidden chain-of-thought.
 
-Before acting in each user turn, call semantic_checkpoint to refresh the objective, explicit completion criteria, evidence-backed facts, open gaps, and next action. Use expected_revision 0 only before the first checkpoint in the session. A new user turn does not reset the revision; otherwise use the exact current revision shown in the latest semantic receipt. After every material observation, replace the whole checkpoint. A met criterion and every retained fact require concise evidence. For each criterion or fact supported by tools, cite the relevant successful environment-tool call ids in evidence_call_ids. The checkpoint separately records every successful environment-tool result observed in the current turn. A ready checkpoint must have at least one criterion, every criterion met, and no open gaps. The checkpoint call already contains the complete state, so its following context is only a compact receipt. Call semantic_state only when resume or compaction has hidden the latest complete checkpoint; do not read it after every update.
+Before acting in each user turn, call semantic_checkpoint to refresh the stable goal contract, global plan graph, explicit completion criteria, evidence-backed facts, open gaps, active plan node, and next action. Goal ids and definitions remain immutable within one goal version. Completion-criterion ids and descriptions also remain stable. A changed plan graph increments plan.revision and states a new concrete change_reason; a new goal id increments goal.version and starts plan revision 1. Keep semantic operations independent of concrete tools and declare their required capabilities. Use expected_revision 0 only before the first checkpoint in the session. A new user turn does not reset the revision; otherwise use the exact current revision shown in the latest semantic receipt. After every material observation, replace the whole checkpoint. A met criterion and every retained fact require concise evidence. For each criterion or fact supported by tools, cite the relevant successful environment-tool call ids in evidence_call_ids. The checkpoint separately records every successful environment-tool result observed in the current turn. A ready checkpoint must have at least one criterion, every criterion met, no open gaps, and no active plan node. The checkpoint call already contains the complete state, so its following context is only a compact receipt. Call semantic_state only when resume or compaction has hidden the latest complete checkpoint; do not read it after every update.
 
 Before semantic_finish succeeds, emit tool calls without accompanying ordinary assistant narration. Do not give the final answer before the completion gate. When and only when the current-turn checkpoint is ready, call semantic_finish with its exact revision and the complete final answer. After that tool accepts the answer, do not call another tool; return the approved answer verbatim as the next and final ordinary assistant text.`
 
@@ -189,10 +191,21 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: CHECKPOINT_TOOL,
-    description: 'Replace the complete event-sourced semantic state. Use expected_revision 0 only when the session has no checkpoint; revisions persist across user turns.',
+    description: 'Replace the complete event-sourced semantic state, including its stable goal contract and global plan graph. Use expected_revision 0 only when the session has no checkpoint.',
     parameters: {
       expected_revision: { type: 'integer', required: true, description: '0 only when the session has no checkpoint; otherwise the exact current revision, including after a new user turn.' },
-      objective: { type: 'string', required: true, description: 'Concrete objective currently being solved.' },
+      goal: {
+        type: 'object',
+        required: true,
+        additionalProperties: false,
+        description: 'Stable task contract. Keep it byte-for-byte equivalent while goal.id is unchanged.',
+        properties: {
+          id: { type: 'string', required: true, description: 'Stable lower-kebab-case task id.' },
+          version: { type: 'integer', required: true, description: '1 initially; increment only when replacing the task with a new goal id.' },
+          statement: { type: 'string', required: true, description: 'Concrete task statement.' },
+          constraints: { type: 'array', required: true, items: { type: 'string' }, description: 'Task, user, and policy constraints preserved by every plan revision.' },
+        },
+      },
       criteria: {
         type: 'array',
         required: true,
@@ -213,6 +226,36 @@ export function apply(ctx: Context, config: Config): void {
             },
           },
         },
+      },
+      plan: {
+        type: 'object',
+        required: true,
+        additionalProperties: false,
+        description: 'Versioned directed acyclic graph of semantic operations that preserves global execution intent.',
+        properties: {
+          revision: { type: 'integer', required: true, description: '1 initially; increment exactly once whenever the node graph changes.' },
+          change_reason: { type: 'string', required: true, description: '"initial-plan" at revision 1; otherwise a new concrete reason for replacing the graph.' },
+          nodes: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true, description: 'Stable lower-kebab-case node id.' },
+                operation: { type: 'string', required: true, description: 'Domain-neutral semantic operation, not a concrete tool name.' },
+                description: { type: 'string', required: true, description: 'Contribution this node makes to the goal.' },
+                depends_on: { type: 'array', required: true, items: { type: 'string' }, description: 'Plan node ids that must complete first.' },
+                required_capabilities: { type: 'array', required: true, items: { type: 'string' }, description: 'Semantic capabilities needed for a reliable implementation.' },
+              },
+            },
+          },
+        },
+      },
+      active_node_id: {
+        oneOf: [{ type: 'string' }, { type: 'null' }],
+        required: true,
+        description: 'Plan node selected for next_action, or null when no node is active.',
       },
       facts: {
         type: 'array',
@@ -265,7 +308,7 @@ export function apply(ctx: Context, config: Config): void {
         throw new Error(`semantic checkpoint stale revision: expected ${expected}, got ${args.expected_revision}`)
       }
       const input: SemanticCheckpointInput = {
-        objective: args.objective,
+        goal: args.goal,
         criteria: args.criteria.map(criterion => ({
           id: criterion.id,
           description: criterion.description,
@@ -273,6 +316,18 @@ export function apply(ctx: Context, config: Config): void {
           evidence: criterion.evidence,
           evidenceCallIds: criterion.evidence_call_ids,
         })),
+        plan: {
+          revision: args.plan.revision,
+          changeReason: args.plan.change_reason,
+          nodes: args.plan.nodes.map(node => ({
+            id: node.id,
+            operation: node.operation,
+            description: node.description,
+            dependsOn: node.depends_on,
+            requiredCapabilities: node.required_capabilities,
+          })),
+        },
+        activeNodeId: args.active_node_id,
         facts: args.facts.map(fact => ({
           id: fact.id,
           statement: fact.statement,
@@ -286,6 +341,7 @@ export function apply(ctx: Context, config: Config): void {
       const observedCallIds = currentTurnObservedCallIds(agent.session.events)
       const availableCallIds = successfulEnvironmentCallIds(agent.session.events)
       const checkpoint = resolveSemanticCheckpoint(input, observedCallIds, availableCallIds)
+      assertSemanticTransition(current?.checkpoint, checkpoint)
       const evidenceCallIds = semanticEvidenceCallIds(checkpoint)
       if (resolved.requireToolEvidence && checkpoint.status === 'ready'
         && !evidenceCallIds.some(callId => observedCallIds.includes(callId))) {
@@ -302,7 +358,7 @@ export function apply(ctx: Context, config: Config): void {
       exec.deferContext(createUserMessage({
         source: {
           kind: 'semantic-checkpoint',
-          version: 4,
+          version: 5,
           sessionId: agent.id,
           checkpointCallId: exec.callId,
           revision: state.revision,

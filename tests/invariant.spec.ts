@@ -9,10 +9,18 @@ import { renderSemanticCheckpointReceipt } from '../src/state.ts'
 import type { SemanticCheckpoint } from '../src/types.ts'
 
 const checkpoint: SemanticCheckpoint = {
-  objective: 'Verify one answer',
+  goal: { id: 'verify-answer', version: 1, statement: 'Verify one answer', constraints: [] },
   criteria: [{
     id: 'verified', description: 'The answer is verified', status: 'unmet', evidence: '', evidenceCallIds: [],
   }],
+  plan: {
+    revision: 1,
+    changeReason: 'initial-plan',
+    nodes: [{
+      id: 'collect-proof', operation: 'collect-proof', description: 'Collect proof', dependsOn: [], requiredCapabilities: [],
+    }],
+  },
+  activeNodeId: 'collect-proof',
   facts: [],
   observedCallIds: [],
   gaps: [{ id: 'missing-proof', description: 'Collect proof' }],
@@ -35,7 +43,7 @@ function callId(revision: number): CallId {
 function argumentsFor(revision: number): string {
   return JSON.stringify({
     expected_revision: revision - 1,
-    objective: checkpoint.objective,
+    goal: checkpoint.goal,
     criteria: checkpoint.criteria.map(criterion => ({
       id: criterion.id,
       description: criterion.description,
@@ -43,6 +51,18 @@ function argumentsFor(revision: number): string {
       evidence: criterion.evidence,
       evidence_call_ids: criterion.evidenceCallIds,
     })),
+    plan: {
+      revision: checkpoint.plan.revision,
+      change_reason: checkpoint.plan.changeReason,
+      nodes: checkpoint.plan.nodes.map(node => ({
+        id: node.id,
+        operation: node.operation,
+        description: node.description,
+        depends_on: node.dependsOn,
+        required_capabilities: node.requiredCapabilities,
+      })),
+    },
+    active_node_id: checkpoint.activeNodeId,
     facts: [],
     gaps: checkpoint.gaps,
     next_action: checkpoint.nextAction,
@@ -70,7 +90,7 @@ function message(revision: number, content = renderSemanticCheckpointReceipt({ r
   return createUserMessage({
     source: {
       kind: 'semantic-checkpoint',
-      version: 4,
+      version: 5,
       sessionId: SessionId('semantic-source'),
       checkpointCallId: callId(revision),
       revision,

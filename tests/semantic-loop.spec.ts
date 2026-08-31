@@ -19,7 +19,12 @@ let callNumber = 0
 
 const exploring = {
   expected_revision: 0,
-  objective: 'Answer the database question',
+  goal: {
+    id: 'answer-database-question',
+    version: 1,
+    statement: 'Answer the database question',
+    constraints: ['Use the query result as evidence'],
+  },
   criteria: [{
     id: 'answer-supported',
     description: 'The answer follows from query output',
@@ -27,6 +32,18 @@ const exploring = {
     evidence: '',
     evidence_call_ids: [],
   }],
+  plan: {
+    revision: 1,
+    change_reason: 'initial-plan',
+    nodes: [{
+      id: 'query-answer',
+      operation: 'query-structured-source',
+      description: 'Query the source needed to answer the question',
+      depends_on: [],
+      required_capabilities: ['structured-query'],
+    }],
+  },
+  active_node_id: 'query-answer',
   facts: [],
   gaps: [{ id: 'missing-query', description: 'Run the required query' }],
   next_action: 'Run the required query',
@@ -46,6 +63,7 @@ const ready = {
     id: 'query-result', statement: 'The result is 42', evidence: 'query q1 row 1', evidence_call_ids: [],
   }],
   gaps: [],
+  active_node_id: null,
   next_action: 'Call semantic_finish with 42',
   status: 'ready',
 } as const
@@ -134,12 +152,12 @@ describe('semantic loop', () => {
     if (receipt?.source.kind !== 'semantic-checkpoint') throw new Error('missing semantic receipt source')
     expect(userText(receipt)).toContain('Semantic state r1 committed')
     expect(userText(receipt)).not.toContain('Answer the database question')
-    expect(receipt.source.checkpoint.objective).toBe('Answer the database question')
+    expect(receipt.source.checkpoint.goal.statement).toBe('Answer the database question')
 
     const recovered = await execute(ctx, agent, 'semantic_state', {})
     expect(recovered.isError).toBe(false)
     expect(recovered.value).toMatchObject({ revision: 1, status: 'exploring' })
-    expect(resultText(recovered)).toContain('Objective: Answer the database question')
+    expect(resultText(recovered)).toContain('Goal answer-database-question@1: Answer the database question')
     expect(SemanticLoop.semanticTelemetryOf(agent)).toMatchObject({
       semanticToolCalls: 2,
       stateReads: 1,
@@ -223,7 +241,7 @@ describe('semantic loop', () => {
     const environmentCallId = CallId('interleaved-failure')
     const finishCallId = CallId('interleaved-finish')
     const checkpoint = SemanticLoop.resolveSemanticCheckpoint({
-      objective: ready.objective,
+      goal: ready.goal,
       criteria: ready.criteria.map(criterion => ({
         id: criterion.id,
         description: criterion.description,
@@ -231,6 +249,18 @@ describe('semantic loop', () => {
         evidence: criterion.evidence,
         evidenceCallIds: criterion.evidence_call_ids,
       })),
+      plan: {
+        revision: ready.plan.revision,
+        changeReason: ready.plan.change_reason,
+        nodes: ready.plan.nodes.map(node => ({
+          id: node.id,
+          operation: node.operation,
+          description: node.description,
+          dependsOn: node.depends_on,
+          requiredCapabilities: node.required_capabilities,
+        })),
+      },
+      activeNodeId: ready.active_node_id,
       facts: ready.facts.map(fact => ({
         id: fact.id,
         statement: fact.statement,
@@ -264,7 +294,7 @@ describe('semantic loop', () => {
       inserted: [createUserMessage({
         source: {
           kind: 'semantic-checkpoint',
-          version: 4,
+          version: 5,
           sessionId: agent.id,
           checkpointCallId,
           revision: 1,
@@ -403,9 +433,9 @@ describe('semantic loop', () => {
   })
 
   it('bounds canonical and rendered checkpoint UTF-8 bytes', async () => {
-    const args = { ...ready, objective: '回答数据库问题：四十二' }
+    const args = { ...ready, goal: { ...ready.goal, statement: '回答数据库问题：四十二' } }
     const checkpoint = SemanticLoop.resolveSemanticCheckpoint({
-      objective: args.objective,
+      goal: args.goal,
       criteria: args.criteria.map(criterion => ({
         id: criterion.id,
         description: criterion.description,
@@ -413,6 +443,18 @@ describe('semantic loop', () => {
         evidence: criterion.evidence,
         evidenceCallIds: criterion.evidence_call_ids,
       })),
+      plan: {
+        revision: args.plan.revision,
+        changeReason: args.plan.change_reason,
+        nodes: args.plan.nodes.map(node => ({
+          id: node.id,
+          operation: node.operation,
+          description: node.description,
+          dependsOn: node.depends_on,
+          requiredCapabilities: node.required_capabilities,
+        })),
+      },
+      activeNodeId: args.active_node_id,
       facts: args.facts.map(fact => ({
         id: fact.id,
         statement: fact.statement,
@@ -469,8 +511,12 @@ describe('semantic loop', () => {
     await execute(ctx, agent, 'semantic_checkpoint', {
       ...exploring,
       expected_revision: 1,
-      criteria: [],
+      criteria: [{
+        ...ready.criteria[0],
+        evidence: 'The criterion is semantically settled without a new tool observation',
+      }],
       gaps: [],
+      active_node_id: null,
       next_action: 'Define completion criteria',
     })
     await stop(ctx, agent)

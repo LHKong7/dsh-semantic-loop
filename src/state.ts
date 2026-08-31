@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from 'node:util'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CallId, type MessageId, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { assertSemanticGoal, assertSemanticPlan, assertSemanticTransition } from './plan.ts'
 import { CHECKPOINT_TOOL, isSemanticToolName } from './protocol.ts'
 import type {
   SemanticCheckpoint,
@@ -11,6 +12,9 @@ import type {
   SemanticCriterion,
   SemanticFact,
   SemanticGap,
+  SemanticGoal,
+  SemanticPlan,
+  SemanticPlanNode,
   SemanticState,
 } from './types.ts'
 
@@ -113,16 +117,88 @@ function decodeGap(value: unknown, index: number): SemanticGap {
   }
 }
 
+/** Decode one persisted stable goal contract. */
+function decodeGoal(value: unknown): SemanticGoal {
+  const record = exactRecord(value, ['id', 'version', 'statement', 'constraints'], 'semantic goal')
+  const version = record['version']
+  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
+    throw new Error('semantic goal version must be a positive safe integer')
+  }
+  const goal: SemanticGoal = {
+    id: checkpointId(record['id'], 'semantic goal id'),
+    version,
+    statement: requiredText(record['statement'], 'semantic goal statement'),
+    constraints: decodeArray(
+      record['constraints'],
+      'semantic goal constraints',
+      (item, index) => requiredText(item, `semantic goal constraint ${index}`),
+    ),
+  }
+  assertSemanticGoal(goal)
+  return goal
+}
+
+/** Decode one persisted plan node. */
+function decodePlanNode(value: unknown, index: number): SemanticPlanNode {
+  const label = `semantic plan node ${index}`
+  const record = exactRecord(
+    value,
+    ['id', 'operation', 'description', 'dependsOn', 'requiredCapabilities'],
+    label,
+  )
+  return {
+    id: checkpointId(record['id'], `${label} id`),
+    operation: requiredText(record['operation'], `${label} operation`),
+    description: requiredText(record['description'], `${label} description`),
+    dependsOn: decodeArray(
+      record['dependsOn'],
+      `${label} dependencies`,
+      (item, dependencyIndex) => checkpointId(item, `${label} dependency ${dependencyIndex}`),
+    ),
+    requiredCapabilities: decodeArray(
+      record['requiredCapabilities'],
+      `${label} required capabilities`,
+      (item, capabilityIndex) => requiredText(item, `${label} required capability ${capabilityIndex}`),
+    ),
+  }
+}
+
+/** Decode one persisted versioned plan graph. */
+function decodePlan(value: unknown): SemanticPlan {
+  const record = exactRecord(value, ['revision', 'changeReason', 'nodes'], 'semantic plan')
+  const revision = record['revision']
+  if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) {
+    throw new Error('semantic plan revision must be a positive safe integer')
+  }
+  const plan: SemanticPlan = {
+    revision,
+    changeReason: requiredText(record['changeReason'], 'semantic plan changeReason'),
+    nodes: decodeArray(record['nodes'], 'semantic plan nodes', decodePlanNode),
+  }
+  assertSemanticPlan(plan)
+  return plan
+}
+
 /** Decode one canonical checkpoint value. */
 function decodeCheckpoint(value: unknown): SemanticCheckpoint {
-  const record = exactRecord(value, ['objective', 'criteria', 'facts', 'observedCallIds', 'gaps', 'nextAction', 'status'], 'semantic checkpoint')
+  const record = exactRecord(
+    value,
+    ['goal', 'criteria', 'plan', 'activeNodeId', 'facts', 'observedCallIds', 'gaps', 'nextAction', 'status'],
+    'semantic checkpoint',
+  )
   const status = record['status']
   if (status !== 'exploring' && status !== 'ready') {
     throw new Error('semantic checkpoint status must be exploring or ready')
   }
+  const activeNodeId = record['activeNodeId']
+  if (activeNodeId !== null && typeof activeNodeId !== 'string') {
+    throw new Error('semantic checkpoint activeNodeId must be a string or null')
+  }
   const checkpoint: SemanticCheckpoint = {
-    objective: requiredText(record['objective'], 'semantic checkpoint objective'),
+    goal: decodeGoal(record['goal']),
     criteria: decodeArray(record['criteria'], 'semantic criteria', decodeCriterion),
+    plan: decodePlan(record['plan']),
+    activeNodeId: activeNodeId === null ? null : checkpointId(activeNodeId, 'semantic checkpoint activeNodeId'),
     facts: decodeArray(record['facts'], 'semantic facts', decodeFact),
     observedCallIds: decodeArray(record['observedCallIds'], 'semantic observed call ids', decodeCallId),
     gaps: decodeArray(record['gaps'], 'semantic gaps', decodeGap),
@@ -135,12 +211,16 @@ function decodeCheckpoint(value: unknown): SemanticCheckpoint {
 
 /** Mutable arguments accepted from the model before canonicalization. */
 export interface SemanticCheckpointInput {
-  /** Concrete objective currently being solved. */
-  readonly objective: string
+  /** Stable task contract currently being solved. */
+  readonly goal: SemanticGoal
   /** Explicit conditions used by the completion gate. */
   readonly criteria: readonly (Omit<SemanticCriterion, 'evidenceCallIds'> & {
     readonly evidenceCallIds: readonly string[]
   })[]
+  /** Stable global operation graph for the current goal. */
+  readonly plan: SemanticPlan
+  /** Plan node selected for the next action, or `null` when none is active. */
+  readonly activeNodeId: string | null
   /** Evidence-backed facts retained for later decisions. */
   readonly facts: readonly (Omit<SemanticFact, 'evidenceCallIds'> & {
     readonly evidenceCallIds: readonly string[]
@@ -210,6 +290,60 @@ function decodeCallGap(value: unknown, index: number): SemanticGap {
   }
 }
 
+/** Decode one goal contract from durable model tool arguments. */
+function decodeCallGoal(value: unknown): SemanticGoal {
+  const record = exactRecord(value, ['id', 'version', 'statement', 'constraints'], 'semantic checkpoint call goal')
+  const version = record['version']
+  if (typeof version !== 'number') throw new Error('semantic checkpoint call goal version must be a number')
+  return {
+    id: modelString(record['id'], 'semantic checkpoint call goal id'),
+    version,
+    statement: modelString(record['statement'], 'semantic checkpoint call goal statement'),
+    constraints: decodeArray(
+      record['constraints'],
+      'semantic checkpoint call goal constraints',
+      (item, index) => modelString(item, `semantic checkpoint call goal constraint ${index}`),
+    ),
+  }
+}
+
+/** Decode one plan node from durable model tool arguments. */
+function decodeCallPlanNode(value: unknown, index: number): SemanticPlanNode {
+  const label = `semantic checkpoint call plan node ${index}`
+  const record = exactRecord(
+    value,
+    ['id', 'operation', 'description', 'depends_on', 'required_capabilities'],
+    label,
+  )
+  return {
+    id: modelString(record['id'], `${label} id`),
+    operation: modelString(record['operation'], `${label} operation`),
+    description: modelString(record['description'], `${label} description`),
+    dependsOn: decodeArray(
+      record['depends_on'],
+      `${label} dependencies`,
+      (item, dependencyIndex) => modelString(item, `${label} dependency ${dependencyIndex}`),
+    ),
+    requiredCapabilities: decodeArray(
+      record['required_capabilities'],
+      `${label} required capabilities`,
+      (item, capabilityIndex) => modelString(item, `${label} required capability ${capabilityIndex}`),
+    ),
+  }
+}
+
+/** Decode one plan graph from durable model tool arguments. */
+function decodeCallPlan(value: unknown): SemanticPlan {
+  const record = exactRecord(value, ['revision', 'change_reason', 'nodes'], 'semantic checkpoint call plan')
+  const revision = record['revision']
+  if (typeof revision !== 'number') throw new Error('semantic checkpoint call plan revision must be a number')
+  return {
+    revision,
+    changeReason: modelString(record['change_reason'], 'semantic checkpoint call plan change reason'),
+    nodes: decodeArray(record['nodes'], 'semantic checkpoint call plan nodes', decodeCallPlanNode),
+  }
+}
+
 /** Decode the model JSON whose successful result commits one checkpoint. */
 function decodeCheckpointCallArguments(raw: string): SemanticCheckpointCallArguments {
   let value: unknown
@@ -220,7 +354,7 @@ function decodeCheckpointCallArguments(raw: string): SemanticCheckpointCallArgum
   }
   const record = exactRecord(
     value,
-    ['expected_revision', 'objective', 'criteria', 'facts', 'gaps', 'next_action', 'status'],
+    ['expected_revision', 'goal', 'criteria', 'plan', 'active_node_id', 'facts', 'gaps', 'next_action', 'status'],
     'semantic checkpoint call arguments',
   )
   const expectedRevision = record['expected_revision']
@@ -231,11 +365,17 @@ function decodeCheckpointCallArguments(raw: string): SemanticCheckpointCallArgum
   if (status !== 'exploring' && status !== 'ready') {
     throw new Error('semantic checkpoint call status must be exploring or ready')
   }
+  const activeNodeId = record['active_node_id']
+  if (activeNodeId !== null && typeof activeNodeId !== 'string') {
+    throw new Error('semantic checkpoint call active_node_id must be a string or null')
+  }
   return {
     expectedRevision,
     input: {
-      objective: modelString(record['objective'], 'semantic checkpoint call objective'),
+      goal: decodeCallGoal(record['goal']),
       criteria: decodeArray(record['criteria'], 'semantic checkpoint call criteria', decodeCallCriterion),
+      plan: decodeCallPlan(record['plan']),
+      activeNodeId,
       facts: decodeArray(record['facts'], 'semantic checkpoint call facts', decodeCallFact),
       gaps: decodeArray(record['gaps'], 'semantic checkpoint call gaps', decodeCallGap),
       nextAction: modelString(record['next_action'], 'semantic checkpoint call next_action'),
@@ -266,6 +406,10 @@ function assertCheckpointRelations(checkpoint: SemanticCheckpoint): void {
   assertUniqueIds('fact', checkpoint.facts)
   assertUniqueIds('gap', checkpoint.gaps)
   assertUniqueCallIds('observed', checkpoint.observedCallIds)
+  const planNodeIds = new Set(checkpoint.plan.nodes.map(node => node.id))
+  if (checkpoint.activeNodeId !== null && !planNodeIds.has(checkpoint.activeNodeId)) {
+    throw new Error(`semantic checkpoint active node "${checkpoint.activeNodeId}" is not in the plan`)
+  }
   for (const criterion of checkpoint.criteria) {
     assertUniqueCallIds(`criterion "${criterion.id}" evidence`, criterion.evidenceCallIds)
     if (criterion.status === 'met' && criterion.evidence.length === 0) {
@@ -288,6 +432,9 @@ function assertCheckpointRelations(checkpoint: SemanticCheckpoint): void {
     }
     if (checkpoint.gaps.length > 0) {
       throw new Error(`ready semantic checkpoint has open gaps: ${checkpoint.gaps.map(item => item.id).join(', ')}`)
+    }
+    if (checkpoint.activeNodeId !== null) {
+      throw new Error('ready semantic checkpoint must not have an active plan node')
     }
   }
 }
@@ -320,7 +467,12 @@ export function resolveSemanticCheckpoint(
   availableCallIds: ReadonlySet<CallId> = new Set(observedCallIds),
 ): SemanticCheckpoint {
   const checkpoint: SemanticCheckpoint = {
-    objective: input.objective.trim(),
+    goal: {
+      id: input.goal.id.trim(),
+      version: input.goal.version,
+      statement: input.goal.statement.trim(),
+      constraints: input.goal.constraints.map(value => value.trim()),
+    },
     criteria: input.criteria.map(criterion => ({
       id: criterion.id.trim(),
       description: criterion.description.trim(),
@@ -328,6 +480,18 @@ export function resolveSemanticCheckpoint(
       evidence: criterion.evidence.trim(),
       evidenceCallIds: criterion.evidenceCallIds.map(value => CallId(value)),
     })),
+    plan: {
+      revision: input.plan.revision,
+      changeReason: input.plan.changeReason.trim(),
+      nodes: input.plan.nodes.map(node => ({
+        id: node.id.trim(),
+        operation: node.operation.trim(),
+        description: node.description.trim(),
+        dependsOn: node.dependsOn.map(value => value.trim()),
+        requiredCapabilities: node.requiredCapabilities.map(value => value.trim()),
+      })),
+    },
+    activeNodeId: input.activeNodeId === null ? null : input.activeNodeId.trim(),
     facts: input.facts.map(fact => ({
       id: fact.id.trim(),
       statement: fact.statement.trim(),
@@ -373,7 +537,7 @@ export function decodeSemanticCheckpointSource(source: unknown): SemanticCheckpo
     'semantic checkpoint source',
   )
   if (record['kind'] !== 'semantic-checkpoint') throw new Error('semantic checkpoint source has an invalid kind')
-  if (record['version'] !== 4) throw new Error('semantic checkpoint source has an unsupported version')
+  if (record['version'] !== 5) throw new Error('semantic checkpoint source has an unsupported version')
   const sessionId = record['sessionId']
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
     throw new Error('semantic checkpoint source sessionId must be non-empty')
@@ -388,7 +552,7 @@ export function decodeSemanticCheckpointSource(source: unknown): SemanticCheckpo
   }
   return {
     kind: 'semantic-checkpoint',
-    version: 4,
+    version: 5,
     sessionId: SessionId(sessionId),
     checkpointCallId: CallId(checkpointCallId),
     revision,
@@ -432,10 +596,24 @@ export function renderSemanticCheckpoint(state: SemanticState): string {
   const observedTools = checkpoint.observedCallIds.length === 0
     ? '- (none in this turn)'
     : checkpoint.observedCallIds.map(callId => `- ${callId}`).join('\n')
+  const plan = checkpoint.plan.nodes.length === 0
+    ? '- (no operations yet)'
+    : checkpoint.plan.nodes.map((node) => {
+      const dependencies = node.dependsOn.length === 0 ? 'root' : `after ${node.dependsOn.join(', ')}`
+      const capabilities = node.requiredCapabilities.length === 0
+        ? ''
+        : `; capabilities: ${node.requiredCapabilities.join(', ')}`
+      const active = checkpoint.activeNodeId === node.id ? ' [active]' : ''
+      return `- ${node.id}${active}: ${node.operation} (${dependencies}${capabilities}) — ${node.description}`
+    }).join('\n')
   return `Semantic state r${revision}. This whole snapshot supersedes every earlier semantic-state snapshot.
 
-Objective: ${checkpoint.objective}
+Goal ${checkpoint.goal.id}@${checkpoint.goal.version}: ${checkpoint.goal.statement}
+Goal constraints: ${checkpoint.goal.constraints.length === 0 ? '(none)' : checkpoint.goal.constraints.join('; ')}
 Status: ${checkpoint.status}
+
+Plan p${checkpoint.plan.revision} (${checkpoint.plan.changeReason}):
+${plan}
 
 Completion criteria:
 ${criteria}
@@ -465,7 +643,7 @@ Next action: ${checkpoint.nextAction}`
 export function renderSemanticCheckpointReceipt(state: SemanticState): string {
   const { revision, checkpoint } = state
   const unmet = checkpoint.criteria.filter(criterion => criterion.status === 'unmet').length
-  return `Semantic state r${revision} committed (${checkpoint.status}; ${checkpoint.gaps.length} open gaps; ${unmet} unmet criteria). The complete state is stored in the Session log. Call semantic_state only to recover it after resume or compaction.`
+  return `Semantic state r${revision} committed (goal ${checkpoint.goal.id}@${checkpoint.goal.version}; plan p${checkpoint.plan.revision}; ${checkpoint.status}; ${checkpoint.gaps.length} open gaps; ${unmet} unmet criteria). The complete state is stored in the Session log. Call semantic_state only to recover it after resume or compaction.`
 }
 
 /** Replay state used to enforce message identity and revision relations. */
@@ -546,6 +724,7 @@ function applySemanticMessage(state: SemanticFoldState, message: UserMessage): v
     throw new Error(`semantic checkpoint revision ${source.revision} observed call ids do not match successful environment-tool results in this turn`)
   }
   assertEvidenceReferences(source.checkpoint, state.successfulCallIds)
+  assertSemanticTransition(state.latest.get(source.sessionId)?.checkpoint, source.checkpoint)
   let revisions = state.revisions.get(source.sessionId)
   if (revisions === undefined) {
     revisions = new Map()
