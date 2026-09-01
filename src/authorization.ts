@@ -4,9 +4,10 @@ import { isDeepStrictEqual } from 'node:util'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { PreToolDecision } from '@deepseek-ai/dsh-tools'
 import type { SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
-import { type MessageId, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { type ContentBlock, type MessageId, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SemanticAction } from './action.ts'
 import type { SemanticCounterexampleRef, SemanticProofRef } from './proof.ts'
+import { foldSemanticBaselines } from './run-state.ts'
 import type { SemanticSpecification } from './specification.ts'
 import { isSha256Digest, semanticDigest } from './canonical.ts'
 
@@ -153,6 +154,19 @@ export function semanticSettlementReceiptDigest(
   receipt: Omit<SemanticActionSettlementReceipt, 'receiptDigest'>,
 ): string {
   return semanticDigest('action-settlement', 1, receipt)
+}
+
+/**
+ * Compute the replayable digest of the durable portion of one tool result.
+ *
+ * @param result Durable error flag and content blocks.
+ * @returns Domain-separated result digest.
+ */
+export function semanticToolResultDigest(result: {
+  readonly isError: boolean
+  readonly content: readonly ContentBlock[]
+}): string {
+  return semanticDigest('tool-result', 1, result)
 }
 
 function requiredText(value: string, label: string): void {
@@ -339,9 +353,15 @@ export function foldSemanticActionLedger(
   events: readonly SessionEvent[],
   sessionId: SessionId,
 ): SemanticActionLedgerProjection {
+  const baselines = foldSemanticBaselines(events).get(sessionId)
   const messages = new Map<MessageId, UserMessage>()
   const calls = new Map<string, { readonly turn: number; readonly seq: number }>()
-  const results = new Map<string, { readonly isError: boolean; readonly seq: number }>()
+  const results = new Map<string, {
+    readonly isError: boolean
+    readonly seq: number
+    readonly turn: number
+    readonly digest: string
+  }>()
   const authorizations = new Map<string, SemanticAuthorizationReceipt>()
   const settled = new Set<string>()
   const entries: SemanticActionLedgerEntry[] = []
@@ -351,7 +371,13 @@ export function foldSemanticActionLedger(
     if (event.type === 'tool/call') calls.set(event.data.callId, { turn: event.data.turn, seq: event.seq })
     if (event.type === 'tool/result') {
       const block = event.data.message.content[0]
-      results.set(block.toolCallId, { isError: block.isError === true, seq: event.seq })
+      const isError = block.isError === true
+      results.set(block.toolCallId, {
+        isError,
+        seq: event.seq,
+        turn: event.data.turn,
+        digest: semanticToolResultDigest({ isError, content: block.content }),
+      })
     }
     for (const message of semanticAuthorizationMessages(event)) {
       const prior = messages.get(message.id)
@@ -368,6 +394,9 @@ export function foldSemanticActionLedger(
           throw new Error('semantic authorization source ownership is invalid')
         }
         assertAuthorizationReceipt(source.receipt)
+        if (baselines?.get(source.receipt.turn)?.baselineDigest !== source.receipt.baselineDigest) {
+          throw new Error(`semantic authorization call ${source.receipt.callId} does not match its turn baseline`)
+        }
         const call = calls.get(source.receipt.callId)
         if (call === undefined || call.turn !== source.receipt.turn || call.seq >= event.seq) {
           throw new Error(`semantic authorization call ${source.receipt.callId} is missing or belongs to another turn`)
@@ -390,10 +419,18 @@ export function foldSemanticActionLedger(
         assertSettlementReceipt(source.receipt)
         const authorization = authorizations.get(source.receipt.authorizationReceiptDigest)
         const result = results.get(source.receipt.callId)
+        const call = calls.get(source.receipt.callId)
         if (authorization === undefined || authorization.actionDigest !== source.receipt.actionDigest
           || authorization.callId !== source.receipt.callId
-          || result === undefined || result.seq >= event.seq) {
+          || result === undefined || result.seq >= event.seq || result.turn !== source.receipt.turn
+          || call === undefined || result.seq <= call.seq) {
           throw new Error(`semantic action settlement ${source.receipt.callId} lacks its authorization or result`)
+        }
+        if (source.receipt.resultDigest !== result.digest) {
+          throw new Error(`semantic action settlement ${source.receipt.callId} result digest does not match its durable tool result`)
+        }
+        if (settled.has(source.receipt.authorizationReceiptDigest)) {
+          throw new Error(`semantic authorization ${source.receipt.authorizationReceiptDigest} is already settled`)
         }
         if (!result.isError && (source.receipt.outcome !== 'succeeded' || source.receipt.dispatchState !== 'settled')) {
           throw new Error(`semantic action settlement ${source.receipt.callId} contradicts its successful result`)

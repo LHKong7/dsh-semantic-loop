@@ -136,6 +136,14 @@ export function foldSemanticCandidates(events: readonly SessionEvent[]): Readonl
         || ledger.ledgerDigest !== source.candidate.dependencyLedgerWatermark) {
         throw new Error('semantic candidate does not match its specification, candidate-phase run, or action ledger')
       }
+      const reference = source.candidate.artifact
+      const artifact = reference === undefined ? undefined : run.snapshot.artifacts.find(item =>
+        item.id === reference.id && item.version === reference.version)
+      const expectedResourceDigests = artifact === undefined ? [] : [artifact.contentDigest]
+      if (source.candidate.kind === 'code-artifact' && artifact === undefined
+        || !isDeepStrictEqual(source.candidate.dependencyResourceDigests, expectedResourceDigests)) {
+        throw new Error('semantic candidate resource dependencies do not match its exact candidate kind and artifact')
+      }
       messages.set(message.id, message)
       latest.set(source.sessionId, { candidate: source.candidate, sourceSeq: event.seq })
     }

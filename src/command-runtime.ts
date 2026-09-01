@@ -22,6 +22,7 @@ import {
   semanticActionLedgerOf,
   semanticAuthorizationReceiptDigest,
   semanticSettlementReceiptDigest,
+  semanticToolResultDigest,
   renderSemanticAuthorizationReceipt,
   renderSemanticSettlementReceipt,
   type SemanticActionLedgerEntry,
@@ -94,7 +95,11 @@ import {
   type SemanticSpecificationReport,
   type SemanticSpecificationSourceV1,
 } from './specification.ts'
-import { renderSemanticSpecificationReceipt, semanticSpecificationOf } from './spec-projection.ts'
+import {
+  assertSemanticSpecificationAuthorityInputs,
+  renderSemanticSpecificationReceipt,
+  semanticSpecificationOf,
+} from './spec-projection.ts'
 import type {
   SemanticArtifact,
   SemanticCapability,
@@ -664,6 +669,7 @@ async function resolveSpecification(
     },
   }
   assertSemanticSpecification(specification)
+  assertSemanticSpecificationAuthorityInputs(specification, messages)
   if (priorSpecification !== undefined) assertSemanticSpecificationTransition(priorSpecification, specification)
   return { specification, isNew: true }
 }
@@ -1394,10 +1400,7 @@ export function applyCommandRuntime(ctx: Context, config: CommandRuntimeConfig):
       sessionId: record.agent.id, turn: record.receipt.turn, callId: record.action.callId,
       authorizationReceiptDigest: record.receipt.receiptDigest,
       actionDigest: record.action.actionDigest, dispatchState, outcome,
-      resultDigest: semanticDigest('tool-result', 1, {
-        isError: result.isError, content: result.content,
-        ...(result.isError ? { error: result.error.message } : {}),
-      }),
+      resultDigest: semanticToolResultDigest({ isError: result.isError, content: result.content }),
       postCheckReportDigests: [],
     }
     const settlement: SemanticActionSettlementReceipt = {

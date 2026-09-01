@@ -144,10 +144,14 @@ export function foldSemanticProofChecks(
   events: readonly SessionEvent[],
   sessionId: SessionId,
 ): ReadonlyMap<string, SemanticProofCheckReceipt> {
+  const calls = new Map<string, { readonly name: string; readonly seq: number }>()
   const successful = new Map<string, number>()
   const messages = new Map<MessageId, UserMessage>()
   const receipts = new Map<string, SemanticProofCheckReceipt>()
   for (const event of events) {
+    if (event.type === 'tool/call') {
+      calls.set(event.data.callId, { name: event.data.name, seq: event.seq })
+    }
     if (event.type === 'tool/result' && event.data.message.content[0].isError !== true) {
       successful.set(event.data.message.content[0].toolCallId, event.seq)
     }
@@ -160,6 +164,8 @@ export function foldSemanticProofChecks(
       if (message.source.kind !== 'semantic-proof-check') continue
       const source = message.source
       const receipt = source.receipt
+      const call = calls.get(receipt.checkerCallId)
+      const resultSeq = successful.get(receipt.checkerCallId)
       const { receiptDigest: _digest, ...core } = receipt
       if (source.version !== 1 || source.sessionId !== sessionId || receipt.sessionId !== sessionId
         || source.authoringCause.kind !== 'runtime' || source.authoringCause.reasonCode !== 'checker-result'
@@ -167,8 +173,9 @@ export function foldSemanticProofChecks(
         || !isSha256Digest(receipt.specificationDigest) || !isSha256Digest(receipt.subjectDigest)
         || !isSha256Digest(receipt.proofContentDigest)
         || receipt.receiptDigest !== semanticProofCheckReceiptDigest(core)
-        || (successful.get(receipt.checkerCallId) ?? event.seq) >= event.seq) {
-        throw new Error('semantic proof-check source is invalid or lacks an earlier successful checker result')
+        || call === undefined || call.name !== receipt.checkerId
+        || resultSeq === undefined || call.seq >= resultSeq || resultSeq >= event.seq) {
+        throw new Error('semantic proof-check source is invalid or lacks its exact earlier successful checker call/result')
       }
       requiredText(receipt.checkerId, 'semantic proof-check checkerId')
       requiredText(receipt.checkerVersion, 'semantic proof-check checkerVersion')

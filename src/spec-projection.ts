@@ -42,6 +42,50 @@ export function semanticSpecificationMessages(event: SessionEvent): readonly Use
   return event.data.inserted.filter(isSemanticSpecificationMessage)
 }
 
+function messageText(message: UserMessage): string {
+  return message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('')
+}
+
+/**
+ * Check specification coverage and user quotations against direct authority messages.
+ *
+ * @param specification Specification whose authority references are being committed or replayed.
+ * @param authorityInputs Direct user messages available to the owning Session.
+ * @returns Nothing; invalid coverage or quotations throw.
+ */
+export function assertSemanticSpecificationAuthorityInputs(
+  specification: SemanticSpecification,
+  authorityInputs: ReadonlyMap<string, UserMessage>,
+): void {
+  for (const coverage of specification.sourceCoverage) {
+    const input = authorityInputs.get(coverage.sourceId)
+    const expected = input?.source.kind === 'user' ? semanticDigest('authority-input', 1, {
+      source: input.source,
+      content: input.content,
+    }) : undefined
+    if (expected === undefined || coverage.inputDigest !== expected) {
+      throw new Error(`semantic specification coverage for "${coverage.sourceId}" does not match its authority input`)
+    }
+  }
+  for (const requirement of [
+    ...specification.assumptions,
+    ...specification.requirements,
+    ...specification.forbiddenStates,
+  ]) {
+    for (const reference of requirement.sources) {
+      if (reference.authority !== 'user') continue
+      const input = authorityInputs.get(reference.sourceId)
+      const text = input?.source.kind === 'user' ? messageText(input) : undefined
+      const quoteMatches = text !== undefined && (reference.start === undefined
+        ? text.includes(reference.quote)
+        : text.slice(reference.start, reference.end) === reference.quote)
+      if (!specification.inputs.includes(reference.sourceId) || !quoteMatches) {
+        throw new Error(`semantic requirement "${requirement.id}" quote does not match its authority input`)
+      }
+    }
+  }
+}
+
 /** Decode and validate one untrusted durable specification source. */
 export function decodeSemanticSpecificationSource(source: unknown): SemanticSpecificationSourceV1 {
   if (typeof source !== 'object' || source === null || Array.isArray(source)) {
@@ -103,16 +147,7 @@ export function foldSemanticSpecifications(
       if (call?.name !== BEGIN_TOOL || !successful.has(source.specificationCallId) || call.seq >= event.seq) {
         throw new Error(`semantic specification is not linked to an earlier successful ${BEGIN_TOOL} call/result`)
       }
-      for (const coverage of source.specification.sourceCoverage) {
-        const input = authorityInputs.get(coverage.sourceId)
-        const expected = input === undefined ? undefined : semanticDigest('authority-input', 1, {
-          source: input.source,
-          content: input.content,
-        })
-        if (expected === undefined || coverage.inputDigest !== expected) {
-          throw new Error(`semantic specification coverage for "${coverage.sourceId}" does not match its authority input`)
-        }
-      }
+      assertSemanticSpecificationAuthorityInputs(source.specification, authorityInputs)
       let ownerVersions = versions.get(source.sessionId)
       if (ownerVersions === undefined) {
         ownerVersions = new Map()

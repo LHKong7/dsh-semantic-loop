@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { CallId, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   EMPTY_ACTION_LEDGER_DIGEST,
   assertSemanticRequirement,
   assertSemanticSpecificationTransition,
   assertUnverifiedCompletionAllowed,
   canonicalJson,
+  foldSemanticProofChecks,
+  renderSemanticProofCheckReceipt,
   semanticDigest,
+  semanticProofCheckReceiptDigest,
   semanticSpecDigest,
   type SemanticActionLedgerProjection,
   type SemanticRequirement,
@@ -88,5 +92,56 @@ describe('proof-carrying semantic primitives', () => {
   it('uses branded Session ids without changing canonical ownership', () => {
     const owner = SessionId('proof-owner')
     expect(semanticDigest('owner', 1, owner)).toBe(semanticDigest('owner', 1, 'proof-owner'))
+  })
+
+  it('rejects a proof-check receipt without its exact earlier checker call', () => {
+    const owner = SessionId('proof-check-owner')
+    const checkerCallId = CallId('checker-call')
+    const core = {
+      sessionId: owner,
+      checkerCallId,
+      checkerId: 'proof-checker',
+      checkerVersion: '1',
+      specificationDigest: 'a'.repeat(64),
+      subjectDigest: 'b'.repeat(64),
+      proofContentDigest: 'c'.repeat(64),
+      verdict: 'accepted' as const,
+    }
+    const receipt = { ...core, receiptDigest: semanticProofCheckReceiptDigest(core) }
+    const source = {
+      kind: 'semantic-proof-check' as const,
+      version: 1 as const,
+      sessionId: owner,
+      authoringCause: { kind: 'runtime' as const, eventId: checkerCallId, reasonCode: 'checker-result' as const },
+      receipt,
+    }
+    const message = createUserMessage({
+      source,
+      content: [{ type: 'text', text: renderSemanticProofCheckReceipt(source) }],
+    })
+    const events: SessionEvent[] = [{
+      type: 'tool/result', seq: 0, time: 0,
+      data: {
+        turn: 1, step: 1,
+        message: createToolResultMessage({ callId: checkerCallId, content: [], isError: false }),
+      },
+      surfaceOp: 'append',
+    }, {
+      type: 'user/message', seq: 1, time: 1, data: message, surfaceOp: 'append',
+    }]
+
+    expect(() => foldSemanticProofChecks(events, owner)).toThrow(/checker call/)
+    const validEvents: SessionEvent[] = [{
+      type: 'tool/call', seq: 0, time: 0,
+      data: {
+        turn: 1, step: 1, callId: checkerCallId,
+        name: 'proof-checker', arguments: '{}',
+      },
+    }, {
+      ...events[0]!, seq: 1, time: 1,
+    }, {
+      ...events[1]!, seq: 2, time: 2,
+    }]
+    expect(foldSemanticProofChecks(validEvents, owner).get(receipt.receiptDigest)).toEqual(receipt)
   })
 })

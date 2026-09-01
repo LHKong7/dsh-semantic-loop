@@ -7,8 +7,19 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { assertSemanticArtifacts, assertSemanticArtifactTransition } from './artifacts.ts'
 import { isSha256Digest, semanticDigest } from './canonical.ts'
 import { assertSemanticPlan } from './plan.ts'
+import {
+  decodeSemanticSpecificationSource,
+  semanticSpecificationMessages,
+} from './spec-projection.ts'
 import type { SemanticArtifact, SemanticFact, SemanticGap, SemanticPlan } from './types.ts'
-import { BEGIN_TOOL, CANDIDATE_TOOL, PROGRESS_TOOL, READY_TOOL, REPLAN_TOOL } from './protocol.ts'
+import {
+  BEGIN_TOOL,
+  CANDIDATE_TOOL,
+  PROGRESS_TOOL,
+  READY_TOOL,
+  REPLAN_TOOL,
+  isSemanticToolName,
+} from './protocol.ts'
 
 /** Runtime-authored identity and policy snapshot for one turn. */
 export interface SemanticTurnBaseline {
@@ -292,6 +303,7 @@ export function foldSemanticRuns(events: readonly SessionEvent[]): ReadonlyMap<S
   const calls = new Map<CallId, { readonly name: string; readonly turn: number; readonly seq: number }>()
   const successful = new Set<CallId>()
   const messages = new Map<MessageId, UserMessage>()
+  const activeSpecifications = new Map<SessionId, string>()
   const latest = new Map<SessionId, SemanticRunPosition>()
   const toolForCommand = {
     begin: BEGIN_TOOL,
@@ -303,6 +315,10 @@ export function foldSemanticRuns(events: readonly SessionEvent[]): ReadonlyMap<S
   for (const event of events) {
     if (event.type === 'tool/call') calls.set(event.data.callId, { name: event.data.name, turn: event.data.turn, seq: event.seq })
     if (event.type === 'tool/result' && event.data.message.content[0].isError !== true) successful.add(event.data.message.content[0].toolCallId)
+    for (const message of semanticSpecificationMessages(event)) {
+      const source = decodeSemanticSpecificationSource(message.source)
+      activeSpecifications.set(source.sessionId, source.specDigest)
+    }
     for (const message of semanticRunMessages(event)) {
       if (!isSemanticRunDeltaMessage(message)) continue
       const priorMessage = messages.get(message.id)
@@ -318,6 +334,9 @@ export function foldSemanticRuns(events: readonly SessionEvent[]): ReadonlyMap<S
       if (call?.name !== toolForCommand[source.command] || !successful.has(source.runCallId)
         || call.seq >= event.seq || call.turn !== source.snapshot.state.turn) {
         throw new Error(`semantic run delta is not linked to an earlier successful ${toolForCommand[source.command]} call/result`)
+      }
+      if (activeSpecifications.get(source.sessionId) !== source.snapshot.state.specDigest) {
+        throw new Error('semantic run delta does not reference the active specification')
       }
       const prior = latest.get(source.sessionId)
       const expectedRevision = (prior?.snapshot.state.revision ?? 0) + 1
@@ -345,8 +364,9 @@ export function foldSemanticRuns(events: readonly SessionEvent[]): ReadonlyMap<S
         ...source.snapshot.facts.flatMap(fact => fact.evidenceCallIds),
         ...source.snapshot.artifacts.flatMap(artifact => artifact.evidenceCallIds),
       ]
-      if (evidenceIds.some(callId => !successful.has(callId))) {
-        throw new Error('semantic run snapshot cites an unsuccessful environment call')
+      if (evidenceIds.some(callId => !successful.has(callId)
+        || isSemanticToolName(calls.get(callId)?.name ?? ''))) {
+        throw new Error('semantic run snapshot cites a call that is not a successful environment call')
       }
       messages.set(message.id, message)
       latest.set(source.sessionId, { snapshot: source.snapshot, runStateDigest: source.runStateDigest, sourceSeq: event.seq })
