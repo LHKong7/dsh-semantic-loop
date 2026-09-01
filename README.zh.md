@@ -2,154 +2,125 @@
 
 [English](README.md) | 中文
 
-本插件由 LHKong7 以个人项目形式维护，是 DeepSeek Harness 的社区插件，并非 DeepSeek AI 官方软件包。
+由 LHKong7 社区维护。这是个人 DeepSeek Harness Bundle，不是 DeepSeek AI 官方软件包。
 
-DeepSeek Harness 的可安装 semantic agent loop。本包导出 profile Bundle、完整的「语义模式」agent preset、loop 插件及其 invariant companion。安装 Bundle 后即可发现该 preset，无需把文件复制到 `dsh` CLI 包中。插件在所属 Session log 中保存有界的全量状态检查点，保留带版本的中间 artifact，暴露可信 capability gap，限制结构性停滞 revision 与失败的协议调用，运行独立 verifier provider，修复过早停止，并且只在存在当前 passing verification receipt 时提交最终答案。它组合现有 Agent、Tool、System Prompt、Session 与 Cordis event 扩展点；不会修改 `@deepseek-ai/dsh-agent-loop`。
+`dsh-semantic-loop` 在不替换 `@deepseek-ai/dsh-agent-loop` 的前提下增加 proof-carrying semantic control plane。0.3 版会在所属 Session log 中记录具有 authority 来源的 specification、增量 run state、精确 action authorization 与 settlement、不可变 candidate、verifier report、proof reference、counterexample，以及 verified 或明确标记为 unverified 的 completion。
 
-本包是实验性的 semantic-workflow MVP。conversation model 通过类型化工具编写每个检查点，插件则在局部 observation 之间保持稳定的 goal contract 与带版本的全局 plan。领域无关的 plan 词汇允许独立 observation compiler 或 verifier 替代模型编写 claim，而无需改变 checkpoint 协议。
+Bundle 提供两个完整 Agent preset：
 
-## 配置
+- `semantic` 使用 command-v2、自适应执行前 policy、对符合条件的 unknown action 请求 approval，并在一次有界 completion repair 后允许考虑明确标记的 unverified result。
+- `semantic-strict` 要求每轮必须先执行 `semantic_begin` 才能派发 environment tool，对 unknown action 关闭失败，并且绝不允许 unverified completion。
 
-随附的 Web 与 Headless profile 模板已经包含此 Bundle。如需把它添加到其他 profile，请安装本包并重启该 profile：
+## 安装
+
+把 Bundle 安装到 profile 后重启该 profile：
 
 ```sh
-dsh plugin --profile web add -w dsh-semantic-loop
+dsh plugin --profile web add dsh-semantic-loop
 dsh --profile web
 ```
 
-包清单通过 `dsh.bundle.patch` 导出 `cordis.patch.yml`，并通过 `dsh.bundle.agentPresets` 导出 `agent-presets/`。Host patch 只挂载一次可选的 DSH invariant registry 与本包的 invariant companion；选择语义模式时才为该 agent 挂载 loop 本身。因此安装 Bundle 不会强制标准、极简、代码或 Cordis 会话使用 semantic 行为。
+Manifest 通过 `dsh.bundle.patch` 暴露 `cordis.patch.yml`，通过 `dsh.bundle.agentPresets` 暴露 `agent-presets/`。Host patch 只挂载一次 invariant registry 与 semantic invariant companion。只有选择 semantic preset 时才会挂载 semantic behavior。
+
+## Command-v2 协议
+
+默认协议使用有界 command 取代重复的 whole-state snapshot：
+
+1. `semantic_begin` 把当前 authority input 绑定到带版本的 Semantic Specification，并创建初始 Plan Graph。
+2. `semantic_progress` 追加 material fact 与 artifact version，更新 criterion 和 gap，并推进 run revision。
+3. `semantic_replan` 只替换 Plan Graph，同时保留不可变 artifact history。
+4. `semantic_ready` 封存结构完整的 run。Ready schema 不含 nullable `active_node_id` 字段。
+5. `semantic_candidate` 提交将被验证的确切 answer、structured output 或 immutable artifact version。
+6. `semantic_verify` 把内置 check 与 scoped verifier provider 聚合成绑定 candidate 的 v2 receipt。
+7. `semantic_finish` 只接受当前 passing candidate 的 digest，并返回已经验证过的 answer。
+
+`semantic_state` 在 resume 或 compaction 后恢复最新 specification 与 run snapshot。`semantic_capabilities` 报告可信 Agent-scoped capability inventory 和 plan 缺失项。V2 model-facing schema 不使用 `oneOf` 或 required-nullable 字段，默认参数硬上限为 8 KiB。
+
+## Specification authority
+
+Direct user、task、policy 和 system source 可以建立 required obligation。Agent-authored requirement 只能是 advisory。每个 direct authority input 都有 coverage disposition；Agent 不能把自己的 review 标记为 fully covered。缺失 trusted mapping coverage 时状态保持 `unknown`，因此 strict completion 失败，而 adaptive mode 只能在报告 residual risk 的情况下交付 unverified result。
+
+Specification revision 形成 immutable lineage。删除或修改 required obligation 需要单独确认的非 Agent amendment。Verification 失败时应修改 candidate、evidence 或 plan，不能静默削弱 specification。
+
+`protocolMode: hybrid` 写入 command-v2 source，并在第一次 begin 时把 v6 checkpoint bridge 成 advisory specification requirement。`legacy-v1` 保留 0.2 的 whole-checkpoint tool 与 reader。公共 v6 replay function 继续导出，因此可以检查旧 Session，而不会在同一个 command-v2 run 中混写新旧格式。
+
+## 执行前 policy 与 ledger
+
+Command-v2 会在派发前根据 immutable execution identity 对每个非 semantic tool call 进行分类。内置 classifier 区分 typed read、typed write、有界 observation-only shell command、已识别 shell mutation、network operation 与 unknown arbitrary execution。Critical unknown call 与固定 hard guard 不能被较低优先级 config 放宽。
+
+`semantic/describe-action` 与 `semantic/authorize` scoped waterfall 允许可信 provider 细化分类并评估 active obligation。Runtime 将其 decision 与 Harness 既有 permission/approval policy 单调合并，通过 guard 绑定确切 tool argument，并写入 authorization 和 settlement receipt。可能已经启动但缺少可信 result 的 tool body 会进入 `needs-reconciliation`，并阻止 completion。
+
+四种 gate mode 为：
+
+| Mode | Behavior |
+| --- | --- |
+| `off` | 不记录完整 semantic safety assurance；不能激活 required pre-action obligation。 |
+| `observe` | 放行普通 environment risk，同时保留内置 critical guard 与具有 authority 的 hard guard。 |
+| `adaptive` | 放行精确低风险 read，根据 policy 对更高不确定性 ask 或 deny，并记录实际 coverage。 |
+| `enforce` | 要求 current-turn begin，并拒绝 unknown required safety 或 action safety。 |
+
+## Verification 与 completion
+
+V2 verifier 同时绑定 `specDigest`、`runStateDigest`、`candidateDigest` 与 `actionLedgerDigest`。互斥的 required coverage bucket 满足：
+
+```text
+formallyProved + runtimeChecked + evidenceBacked + violated + unknown = requiredTotal
+```
+
+Provider 可以提出 formal assurance，但如果对应 proof 没有匹配的 independent checker receipt，runtime 会降低 `formally-proved`。Counterexample 与 proof reference 都采用 content address，并绑定到确切 verification subject。
+
+Adaptive degradation 不是 passing verification。达到 protocol failure threshold 或 completion repair limit 后，只有在 config 允许、不存在禁止降级的 required final obligation、且 action ledger 安全并完全结算时，stopping boundary 才能生成绑定 exact content 的 `semantic-degradation` receipt。Strict mode 始终明确报告 verification failure。
+
+## 配置
 
 ```yaml
 - id: semantic-loop
-  name: 'dsh-semantic-loop'
+  name: dsh-semantic-loop
   config:
-    maxRepairSteps: 3
-    maxCheckpointBytes: 65536
-    maxStagnantRevisions: 3
-    maxProtocolFailures: 5
+    protocolMode: command-v2
+    preActionGate: adaptive
+    unknownActionPolicy: ask
+    requireCurrentTurnBegin: false
+    formalPreflightMinRisk: high
+    preflightFastPathBudgetMs: 250
+    allowUnverifiedCompletion: true
+    maxAdaptiveCompletionRepairs: 1
+    progressUpdatePolicy: material-only
+    maxProtocolFailures: 3
+    maxCommandBytes: 8192
     requireToolEvidence: false
-    capabilities:
-      - id: structured-query
-        description: Query structured data through the deployment's database tool.
-
-- id: semantic-loop-invariants
-  name: '@deepseek-ai/dsh-invariants'
-
-- id: semantic-loop-invariant
-  name: 'dsh-semantic-loop/invariant'
+    capabilities: []
 ```
 
-`maxRepairSteps` 是正安全整数，用于限制同一未变化检查点 revision 上连续执行的停止边界修复次数。新 revision 会重置计数。超过限制时，turn 会失败，而不会继续无进展的修复循环。
+`maxRepairSteps`、`maxCheckpointBytes` 和 `maxStagnantRevisions` 继续供 `legacy-v1` 使用。Runtime 会把 `formalPreflightMinRisk`、`preflightFastPathBudgetMs` 与 abort signal 传给 authorization provider。生产默认值是 `progressUpdatePolicy: material-only`；`every-action` 只用于诊断。
 
-`maxCheckpointBytes` 默认为 65,536。它同时限制 canonical checkpoint JSON 与其 UTF-8 模型可见渲染。过大的替换会在进入持久 inbox 前失败，因此单次模型调用无法创建无界的保留快照。
+Load-time validation 会拒绝未要求 current-turn begin 的 strict mode、允许 unverified completion 的 strict mode，以及使用 `unknownActionPolicy: observe` 的 strict mode。当 gate 为 `off` 时，specification activation 也会拒绝 required pre-action obligation。
 
-`maxStagnantRevisions` 默认为 `3`。初始化、替换 goal、修改 plan revision、追加 artifact version、新满足 criterion、关闭 gap、增加或更新 fact，以及新关联 evidence 都算 material progress。Tool call、raw observation、修改 `next_action` 与移动 active node 本身都不算。插件最多接受配置数量的连续 no-progress checkpoint，之后必须进行 material update。
+## Extension point
 
-`maxProtocolFailures` 默认为 `5`。它统计一个 turn 内失败的顶层 `semantic_*` tool result，包括参数无效，以及 checkpoint、verification 或 finish 被拒绝。达到上限时，插件会用明确的 hook 原因取消当前 turn。同一 turn 内成功的 semantic call 不会清除之前的失败；Agent 回到 idle 后计数重置。
+可信插件可以通过 Agent-scoped Cordis waterfall 贡献能力：
 
-`requireToolEvidence` 默认为 `false`。启用后，ready checkpoint 必须显式引用至少一个在当前 turn 观察到的成功 environment-tool result。需要数据库或其他工具 observation 的 DAB task 应启用它；无需 environment call 的算术等任务应保持禁用。Bundle 会把 invariant companion 与 `@deepseek-ai/dsh-invariants` 一起挂载，以便在发布前拒绝格式错误、revision 不连续、source/content 不一致或 result correlation 错误的检查点流。
+- `semantic/specification` 提供 task、policy 或 system requirement 与 trusted source coverage。
+- `semantic/capabilities` 提供当前 capability inventory。
+- `semantic/describe-action` 在不改变 runtime-minted call identity 的前提下细化 tool action description。
+- `semantic/authorize` 评估 pre-action obligation 与 policy rule。
+- `semantic/verify-v2` 提供绑定 candidate 的 check、proof reference 与 counterexample。
 
-`capabilities` 声明当前 deployment 确实能够提供的语义操作。随附的语义模式 preset 会声明 shell、filesystem、code-search、background-job 与 skill-discovery capability。DAB composition 只应在真实 provider 存在时增加 `structured-query`、`semantic-entity-extraction` 或 `date-normalization`。可信插件也可以通过所属 Agent 的 scoped `semantic/capabilities` waterfall 动态贡献 declaration，无需使用静态 config。
+Package root 导出 canonical digest helper，以及 specification、baseline、run delta、candidate、action ledger、v1/v2 verification receipt、degradation receipt 与 legacy v6 checkpoint 的严格 projection。Invariant companion 会在 candidate Session event 发布前回放所有这些 source type。
 
-## Capability 协议
+## 限制
 
-`semantic_capabilities` 返回可信的 Agent-scoped inventory、最新 Plan Graph 要求的唯一 capability id，以及所有 missing id。缺失 capability 会保持为显式 execution gap：Agent 可以取得 provider、通过带版本的 replan 选择受支持的语义操作，或请求帮助。内置 verifier 会为每个已声明的 plan requirement 产生一个 required `runtime.capability-availability` check，因此 provider 缺失会得到 `unknown` verdict 并阻止 completion。
-
-Capability availability 不会证明实现质量、权限或对特定任务的适用性。Plan requirement 仍由模型编写；除非 task 或 policy verifier 独立要求，否则被模型漏掉的 requirement 不可见。这种分离会阻止 Agent 在 provider 缺失时自我批准，但不会声称通用 runtime discovery 能推断正确 plan 所需的全部 capability。
-
-## 语义状态
-
-`semantic_checkpoint` 替换完整语义状态，并通过 `expected_revision` 执行 compare-and-set 更新。revision `0` 创建 revision `1`；之后每次调用都要给出最新的确切 revision。状态包含稳定的 goal contract、显式 completion criteria、带版本的全局 plan graph、一个 active plan node、有证据支持的 facts、open gaps、一个 next action，以及 `exploring` 或 `ready` status。集合 id 使用 lower-kebab-case，并且在各自集合内保持唯一。
-
-首个 goal 与 plan 的 version 均为 `1`，首个 plan 的 `change_reason` 为 `initial-plan`。goal id 不变时，其 statement、constraints 与 completion-criterion definition 必须保持稳定。修改 plan graph 时，`plan.revision` 必须恰好递增一次，并给出新的具体原因。替换任务时，必须使用新的 goal id、下一个 goal version，并从 plan revision `1` 重新开始。Plan node 描述语义 operation、dependency 与 required capability，而不是具体 tool 名。插件会拒绝缺失 dependency、重复 edge、cycle、静默 goal drift 及未做版本变更的 plan 替换。Ready checkpoint 不得保留 active plan node。
-
-Plan node 还会声明稳定的 input/output artifact id。一个 goal 内的 `artifacts` 只能追加：每个不可变 version 会保留精简的 kind 与 summary、用于恢复完整 payload 的不透明 locator、content digest、producer plan node 及 revision、确切 input version 和支持它的 tool-result id。上游 replacement 会让下游 artifact 变为 stale；plan revision 会保守地让较早 revision 生成的全部 plan artifact 变为 stale。Ready checkpoint 要求每个 required plan node 都有 current output artifact。替换 goal 时不继承 artifact。
-
-`met` criterion 要求非空 evidence，`unmet` criterion 则携带空 evidence。`ready` 要求至少一个 criterion、所有 criterion 均为 `met`，且不存在 gap。每个 fact 也必须有 evidence。每个 criterion 与 fact 都有 `evidence_call_ids`：模型选择支持该 claim 的成功 environment-tool result，插件则对照更早的 Session log 验证每个 id。checkpoint 另行记录 `observedCallIds`，即当前 turn 中已经看到的全部成功 environment result。这样，无关的成功调用不会仅因发生在 checkpoint 之前就自动成为证据。
-
-`semanticProgressOf(agent)` 与 `semanticProgressTimeline(states)` 会从 canonical checkpoint history 推导 material-change label 与当前 stagnation streak。该分类忽略 loop count 与 raw tool traffic。`semantic_state` 会包含最新 progress classification 以支持 resume 诊断，benchmark telemetry 则分别统计 material 与 stagnant checkpoint revision。
-
-该工具把 semantic-checkpoint user message 作为 result context 返回。Agent Loop 先提交 tool result，再把该 message 插入持久的 next-step inbox。其 version `6` source 保存完整规范检查点、所属 `SessionId`，以及编写该值的 `checkpointCallId`；其文本是精简的提交回执。回放要求该 id 指向更早成功的 `semantic_checkpoint` call/result，并根据持久 call argument 与调用时 observation 重新构造 checkpoint，拒绝任何差异。回放还会按 message id 去重之后出现的 `user/message`，要求 revision 连续，验证每条 claim reference，并在 fork 以新 Session id 启动时忽略继承而来的父级状态。同一 id 的 resume 会延续 revision 流。只有当 resume 或 compaction 隐藏了原始 checkpoint call 时，才使用 `semantic_state` 渲染最新完整快照；常规更新不应调用它。
-
-## 验证协议
-
-`semantic_verify(expected_revision)` 只针对最新 environment result 之后创建的确切 ready checkpoint 运行。内置 runtime verifier 会记录 goal transition、plan graph、artifact lineage、evidence correlation 与每个已声明 plan capability 的 required check。可信插件可以通过 owning agent 的 scoped `semantic/verify` waterfall 添加 task、policy、executable、SMT、theorem-prover 或 human-approval report；挂载到一个 agent preset 的 verifier 不会影响另一个 agent。内置 report 在 provider chain 外加入，provider 无法替换它。
-
-Receipt 由 verifier 而非 conversation model 创建，并持久绑定 `SessionId`、checkpoint revision 与 SHA-256 checkpoint digest。每个 report 都声明 verifier id、specification version、assurance level、check 与可选 proof digest。Required `violated` check 产生 `failed`；required `unknown` check 产生 `unknown`；completion 要求 `passed`。Agent-issued check 不能是 required，因此模型不能自行定义批准自己的规则。新的 checkpoint revision 或 digest 变化会让旧 receipt 失效。
-
-## 完成协议
-
-`semantic_finish(expected_revision, answer)` 要求 checkpoint 在当前 turn 内、且在最新 environment-tool result（包括失败 result）之后创建，并要求确切的最新 revision、`ready` status、当前 passing verification receipt 与非空 answer。成功执行会持久记录临时批准，并指示下一模型 step 原样返回该 answer。只有当同一新鲜度关系仍然成立、其后没有 tool call 或 checkpoint，且下一条普通 assistant text 与获批 answer 完全一致时，停止边界才会关闭 turn。任何后续活动都会使较早的批准失效，即使 answer text 没有变化。
-
-如果模型在批准前尝试用普通 assistant text 停止，`agent/turn-stopping` 会把一条纠正消息 steer 到同一 turn。未初始化状态会请求首个检查点；exploring 状态会列出未满足 criterion 与 gap id；ready 状态在当前 receipt 缺失或未通过时会先请求 verification，verification 通过后再请求 `semantic_finish`。后续 tool 活动会要求新的 ready checkpoint 与 finish call。缺失或不匹配的批准后 assistant answer 会收到包含获批确切文本的纠正 context。停止边界之前已经提交的临时 assistant text 会保留在 transcript 中。
-
-Benchmark answer extraction 应使用 `semanticCompletionInTurn(agent, turn)`。只有终态批准及其精确最终 assistant echo 存在时，它才返回 `{ turn, revision, answer }`；仅执行成功但后来失效的 `semantic_finish` result 不会返回 completion。
-
-## DAB 对比
-
-DAB 对比让同一 task、model 与 environment-tool budget 运行两次：一次使用标准模式作为 ReAct baseline；一次使用语义模式作为干预组。当有效 DAB answer 必须来自 database/tool observation 时，请设置 `requireToolEvidence: true`。`semanticEvidenceOf(agent)` 只返回最新 checkpoint 的 criterion、fact 或 artifact 显式引用的成功 call/result pair；correlation 证明 observation 存在，而 verifier 仍须判断它是否支持所声称的 fact 与 answer。
-
-`semanticTelemetryOf(agent)` 会把协议开销与任务工作分开：
-
-| Counter | 评测含义 |
-| --- | --- |
-| `semanticToolCalls`、`semanticToolFailures` | 全部协议 call 及其中失败的子集；分别报告干预开销与重试开销。 |
-| `verificationAttempts`、`verificationReceipts`、`passedVerifications` | Verifier 执行成本以及 durable/pass receipt 数量。 |
-| `stateReads`、`capabilityReads` | 按需 state recovery 与 capability inspection 开销。 |
-| `environmentToolCalls` | 顶层非 semantic call；用于让两组保持相同 environment-tool budget。 |
-| `successfulEnvironmentToolCalls` | 产生成功 result 的 environment call。 |
-| `checkpointRevisions`、`finishAttempts`、`acceptedFinishResults`、`repairSteps` | Semantic-loop 协议行为与失败/重试成本。 |
-| `materialProgressRevisions`、`stagnantCheckpointRevisions`、`currentStagnationStreak` | 新 revision 是否改变了语义工作，而不只是延长执行。 |
-| `evidenceToolResults` | 最新 checkpoint 引用的成功 environment result。 |
-| `observedToolResults` | 最新 checkpoint 在其 turn 中更早观察到的成功 environment result，包括未被 claim 引用的结果。 |
-
-配对 runner 仍负责 model-request 数量、input/output/cache token、latency、database container、answer normalization 与 ground-truth scoring。DAB environment adapter 与配对 runner 保持独立，因为这些不属于 loop protocol。
-
-## 模型体验
-
-### 语义策略、状态与完成
-
-#### 模型看到什么
-
-一个稳定的 system section 定义 `semantic_checkpoint`、`semantic_state`、`semantic_capabilities`、`semantic_verify` 与 `semantic_finish` 协议。每个被接受的 revision 已经在 assistant checkpoint-call argument 中携带一次完整的模型编写状态，并在持久 message provenance 中保存其规范值。随后的 user-role context 只是一条精简提交回执。Resume 或 compaction 使原始 call 不可见时，`semantic_state` 才返回最新的完整渲染。Capability inspection、verification 与 checkpoint result 会添加精简文本；finish 会添加获批答案指令。只有当模型尝试在协议外完成、在批准后继续工作或改变获批答案时，才会出现纠正性停止消息。
-
-##### Semantic agent loop policy
-
-```markdown
-This session uses the semantic agent loop. Maintain a concise semantic state of externally checkable commitments, not hidden chain-of-thought.
-
-Before acting in each user turn, call semantic_checkpoint to refresh the stable goal contract, global plan graph, append-only versioned semantic artifacts, explicit completion criteria, evidence-backed facts, open gaps, active plan node, and next action. The fields goal, criteria, plan, active_node_id, artifacts, facts, gaps, next_action, and status are top-level siblings; plan contains only revision, change_reason, and nodes. Plan nodes describe only task dataflow. Never add semantic_checkpoint, semantic_state, semantic_capabilities, semantic_verify, semantic_finish, their calls, or their receipts as plan nodes, artifacts, or required capabilities: they are the control protocol, not task capabilities. Use an empty required_capabilities array when a task node needs no declared runtime capability. Goal ids and definitions remain immutable within one goal version. Completion-criterion ids and descriptions also remain stable. A changed plan graph increments plan.revision and states a new concrete change_reason; a new goal id increments goal.version and starts plan revision 1 without inherited artifacts. Keep semantic operations independent of concrete tools and declare their required capabilities, input artifact ids, and output artifact id. Call semantic_capabilities before relying on a declared capability and after runtime composition may have changed. A missing capability is a plan gap: acquire a provider, choose a supported operation, or ask for help instead of substituting an unverified regex or ad-hoc pipeline. Preserve every committed artifact version unchanged and append replacements with the next version. Derived artifacts cite exact input versions; a changed plan or newer upstream version makes dependent artifacts stale. Use locators and content digests instead of copying large payloads into summaries. Use expected_revision 0 only before the first checkpoint in the session. A new user turn does not reset the revision; otherwise use the exact current revision shown in the latest semantic receipt. After every material observation, replace the whole checkpoint. A met criterion and every retained fact require concise evidence. For each criterion, fact, or artifact supported by tools, cite the relevant successful environment-tool call ids in evidence_call_ids. The checkpoint separately records every successful environment-tool result observed in the current turn. Tool-call count, a changed next_action, or active-node movement alone is not material progress. Repeated no-progress revisions are bounded; revise the plan, append or correct an artifact, meet a criterion, close a gap, or request a missing capability. A ready checkpoint must include active_node_id: null explicitly, have at least one criterion, every criterion met, no open gaps, and a current artifact for every required task node. For a small task that needs no environment observation, the initial checkpoint may already be ready with one task node, its current answer artifact, an empty required_capabilities array, a met criterion, no gaps, and active_node_id: null. The checkpoint call already contains the complete state, so its following context is only a compact receipt. Call semantic_state only when resume or compaction has hidden the latest complete checkpoint; do not read it after every update.
-
-Before semantic_finish succeeds, emit tool calls without accompanying ordinary assistant narration. Do not give the final answer before the completion gate. When the current-turn checkpoint is ready, call semantic_verify with its exact revision. Verification obligations come from the runtime and registered providers, not from agent-authored criteria. If any required check is violated or unknown, use its detail or counterexample to revise the plan, artifacts, or checkpoint and verify again. When and only when the exact latest ready revision has a passing receipt, call semantic_finish with that revision and the complete final answer. After that tool accepts the answer, do not call another tool; return the approved answer verbatim as the next and final ordinary assistant text.
-```
-
-#### Token 影响
-
-固定 policy 与五个 tool schema 会出现在每次请求中。每个 revision 会在 checkpoint-call argument 中追加一次完整状态，再加上精简的 result 与 context 回执。Capability inspection 会增加一条精简 result；每次 verification 会增加精简 result 与 verifier-generated receipt。`maxCheckpointBytes` 会限制每个 checkpoint，但更早的 call argument 仍留在 provider history 中，因此累计 token 用量仍随 checkpoint 数量增长。调用 `semantic_state` 会再增加一条完整 tool result，所以只应用于恢复。
-
-#### KV Cache 影响
-
-只要插件 generation 与 config 不变，system prefix 与 tool schema 就保持稳定。检查点、tool result 与修复消息追加在可复用 prefix 之后。较新的检查点不会改写较早请求的字节。
+- 本包不内置 theorem prover、SMT solver 或 domain compiler。Formal assurance 需要可信 provider 与 independent checker receipt。
+- 如果没有 trusted extractor 或 reviewer，整个 authority input 的 mapping 保持 unknown；验证已提交 quote 不等于完整 requirement extraction。
+- 当前 Harness tool lifecycle 会暴露 exact call identity 与 pre/post hook，但不会暴露每个 approval-channel identifier 或 backend dispatch milestone。Receipt 只记录 host 能够确定的 lifecycle state，而不确定的 effectful failure 必须 reconciliation。
+- Resource freshness 与 TOCTOU safety 依赖 provider 提供的 immutable digest 或 snapshot。未知 freshness 会保留为 residual risk。
+- 插件不提供 benchmark database、answer scoring 或 DAB environment adapter。
 
 ## 开发
-
-仓库的 `.npmrc` 会启用 legacy peer installation，因为 DeepSeek Harness release-candidate package 通过 peer dependency 暴露其 runtime composition，而 npm 10 在解析完整 optional peer graph 时可能失败。Lockfile 与显式 development peer 让独立检查可以复现：
 
 ```sh
 npm ci
 npm run check
 ```
 
-`npm run check` 会运行独立 typecheck、package test、两个 ESM build 与 `publint`。本包自己的 Vitest config 会把 test discovery 限制在当前仓库内，即使 checkout 嵌套在 DeepSeek Harness 下也是如此。
-
-## 已知限制与后续工作
-
-- **模型编写检查点** — 当前由 conversation model 完成 observation-to-state compilation；尚无独立 compiler model 或确定性的领域 compiler。
-- **模型编写 artifact metadata** — artifact locator 与 content digest 会接受结构验证，但尚未由独立 materializer 生成。
-- **模型编写 capability requirement** — inventory check 只能为 plan 中明确命名的 capability 查找缺失 provider；task 与 policy verifier 必须发现遗漏的 requirement 或不合适的 fallback strategy。
-- **结构化 progress heuristic** — stagnation limit 会忽略 tool-call volume，但模型仍可能制造 plan 或 fact churn；独立 verification 必须判断所报告的变化是否有用并得到支持。
-- **Correlation 不等于 entailment** — gate 会验证 criterion、evidence 是否存在、gap 是否关闭及引用的成功 environment result 是否存在，但领域 verifier 仍须检查支持关系与 ground truth。
-- **Runtime check 不是通用证明** — 内置 receipt 报告 `runtime-checked`；只有采用可检查形式化策略的 provider 才应报告 `formally-proved`。
-- **Checkpoint call 仅追加增长** — 精简回执避免了第二份完整副本，但更早的 checkpoint-call argument 仍会保留，直到普通 compaction 移除其 token 成本。
-- **精确终态复述** — 修复前可能已经记录普通 assistant text 作为临时输出；有效产品 completion 必须是最新 finish 批准后的第一条普通 assistant message，并且完全复述该 answer。
-- **尚无 DAB environment adapter** — database lifecycle、SQL/Python tool、dataset loading、answer extraction 与 comparative reporting 均不在本包内。
+`npm run check` 会执行 typecheck、focused Vitest coverage、两个 ESM build 与 `publint`。

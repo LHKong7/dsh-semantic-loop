@@ -1,5 +1,5 @@
-# The `semantic` agent preset: the full coding agent with semantic checkpoints
-# and a verified completion gate, mounted once per process.
+# The `semantic` agent preset: the full coding agent with incremental semantic
+# commands, adaptive action policy, and candidate-bound verification.
 #
 # This file is an AGENT-PLANE composition. The roster mounts it ONCE under a
 # standing scope; every session naming it joins by scope parentage, so the
@@ -40,9 +40,20 @@
 - id: semantic-loop
   name: 'dsh-semantic-loop'
   config:
+    protocolMode: command-v2
+    preActionGate: adaptive
+    unknownActionPolicy: ask
+    requireCurrentTurnBegin: false
+    formalPreflightMinRisk: high
+    preflightFastPathBudgetMs: 250
+    allowUnverifiedCompletion: true
+    maxAdaptiveCompletionRepairs: 1
+    progressUpdatePolicy: material-only
     maxRepairSteps: 3
     maxStagnantRevisions: 3
-    maxProtocolFailures: 5
+    maxProtocolFailures: 3
+    maxCommandBytes: 8192
+    requireToolEvidence: false
     capabilities:
       - id: shell-execution
         description: Run bounded shell commands through the preset's sandboxed shell tool.

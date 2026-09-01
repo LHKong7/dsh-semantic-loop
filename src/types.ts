@@ -2,6 +2,7 @@
 
 import type { CallId, ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SemanticVerificationSourceV2 } from './verification-v2.ts'
 
 /** Whether one explicit completion criterion remains open. */
 export type SemanticCriterionStatus = 'unmet' | 'met'
@@ -298,8 +299,20 @@ export interface SemanticCompletion {
 
 /** Log-derived counters for paired ReAct and semantic-loop evaluation. */
 export interface SemanticTelemetry {
-  /** Owner-scoped checkpoint revisions committed so far. */
+  /** Latest owner-scoped legacy checkpoint or command-v2 run revision. */
   readonly checkpointRevisions: number
+  /** Latest command-v2 specification version, or zero in a legacy-only Session. */
+  readonly specificationVersion: number
+  /** Latest command-v2 run revision, or zero in a legacy-only Session. */
+  readonly runRevision: number
+  /** Durable exact candidate submissions. */
+  readonly candidateSubmissions: number
+  /** Runtime-minted pre-action authorization receipts. */
+  readonly actionAuthorizations: number
+  /** Durable post-action settlement receipts. */
+  readonly actionSettlements: number
+  /** Exact-content unverified completion receipts still valid at the Session tail. */
+  readonly unverifiedCompletions: number
   /** Top-level calls to semantic protocol tools. */
   readonly semanticToolCalls: number
   /** Failed top-level semantic-protocol results. */
@@ -353,6 +366,6 @@ declare module '@deepseek-ai/dsh-llm' {
     /** Whole semantic-state replacement emitted by the experimental semantic loop. */
     'semantic-checkpoint': SemanticCheckpointSource
     /** Verifier-authored receipt bound to one exact semantic checkpoint revision and digest. */
-    'semantic-verification': SemanticVerificationSource
+    'semantic-verification': SemanticVerificationSource | SemanticVerificationSourceV2
   }
 }

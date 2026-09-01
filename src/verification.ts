@@ -326,7 +326,7 @@ export function decodeSemanticVerificationSource(source: unknown): SemanticVerif
  * @returns Whether the source discriminant identifies a verification receipt.
  */
 export function isSemanticVerificationMessage(message: UserMessage): boolean {
-  return message.source.kind === 'semantic-verification'
+  return message.source.kind === 'semantic-verification' && message.source.version === 1
 }
 
 /**

@@ -96,6 +96,7 @@ async function setup(
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(AgentLoop, { agents: [] })
   const fiber = await ctx.plugin(SemanticLoop, {
+    protocolMode: 'legacy-v1',
     maxRepairSteps,
     requireToolEvidence,
     maxCheckpointBytes,
@@ -524,6 +525,12 @@ describe('semantic loop', () => {
     expect(SemanticLoop.semanticEvidenceOf(agent)).toEqual([])
     expect(SemanticLoop.semanticTelemetryOf(agent)).toEqual({
       checkpointRevisions: 0,
+      specificationVersion: 0,
+      runRevision: 0,
+      candidateSubmissions: 0,
+      actionAuthorizations: 0,
+      actionSettlements: 0,
+      unverifiedCompletions: 0,
       semanticToolCalls: 0,
       semanticToolFailures: 0,
       stateReads: 0,
@@ -996,7 +1003,7 @@ describe('semantic loop', () => {
     await mountAgentLoopTestDependencies(ctx)
     await expect(ctx.plugin(SemanticLoop, { maxRepairSteps: 0 }).then(() => undefined)).rejects.toThrow(/expected number >= 1/)
 
-    const fiber = await ctx.plugin(SemanticLoop, { maxRepairSteps: 1 })
+    const fiber = await ctx.plugin(SemanticLoop, { protocolMode: 'legacy-v1', maxRepairSteps: 1 })
     expect(ctx.tools.schemas().map(schema => schema.name)).toEqual(expect.arrayContaining(['semantic_checkpoint', 'semantic_state', 'semantic_finish']))
     await fiber.dispose()
     expect(ctx.tools.schemas().map(schema => schema.name)).not.toEqual(expect.arrayContaining(['semantic_checkpoint', 'semantic_state', 'semantic_finish']))
@@ -1008,7 +1015,7 @@ describe('semantic loop', () => {
 
     const rawCtx = new Context()
     await mountAgentLoopTestDependencies(rawCtx)
-    SemanticLoop.apply(rawCtx, {})
+    SemanticLoop.apply(rawCtx, { protocolMode: 'legacy-v1' })
     expect(rawCtx.tools.schemas().map(schema => schema.name)).toEqual(expect.arrayContaining(['semantic_checkpoint', 'semantic_state', 'semantic_finish']))
   })
 

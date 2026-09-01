@@ -40,6 +40,7 @@ import {
 } from './state.ts'
 import type { SemanticCheckpointInput } from './state.ts'
 import type { SemanticCapability, SemanticState, SemanticVerificationReceipt } from './types.ts'
+import { applyCommandRuntime } from './command-runtime.ts'
 import {
   renderSemanticVerificationReceipt,
   semanticCheckpointHash,
@@ -49,6 +50,17 @@ import {
 } from './verification.ts'
 
 export type * from './types.ts'
+export * from './action.ts'
+export * from './authorization.ts'
+export * from './candidate.ts'
+export * from './canonical.ts'
+export * from './degradation.ts'
+export * from './proof.ts'
+export * from './run-state.ts'
+export * from './runtime-cache.ts'
+export * from './specification.ts'
+export * from './spec-projection.ts'
+export * from './verification-v2.ts'
 export {
   assertSemanticArtifacts,
   assertSemanticArtifactTransition,
@@ -104,10 +116,31 @@ export const inject = ['agents', 'tools', 'systemPrompt']
 const DEFAULT_MAX_REPAIR_STEPS = 3
 const DEFAULT_MAX_CHECKPOINT_BYTES = 65_536
 const DEFAULT_MAX_STAGNANT_REVISIONS = 3
-const DEFAULT_MAX_PROTOCOL_FAILURES = 5
+const DEFAULT_MAX_PROTOCOL_FAILURES = 3
+const DEFAULT_MAX_COMMAND_BYTES = 8_192
+const DEFAULT_PREFLIGHT_FAST_PATH_BUDGET_MS = 250
+const DEFAULT_MAX_ADAPTIVE_COMPLETION_REPAIRS = 1
 
 /** Runtime policy for refusal-to-follow-protocol repair. */
 export interface Config {
+  /** Durable protocol written for new semantic control events. */
+  readonly protocolMode?: 'legacy-v1' | 'hybrid' | 'command-v2'
+  /** Semantic action-policy enforcement level. */
+  readonly preActionGate?: 'off' | 'observe' | 'adaptive' | 'enforce'
+  /** Decision for actions that remain unclassified below an immutable hard guard. */
+  readonly unknownActionPolicy?: 'observe' | 'ask' | 'deny'
+  /** Require semantic_begin in the active turn before environment tools may dispatch. */
+  readonly requireCurrentTurnBegin?: boolean
+  /** Minimum risk eligible for a registered formal preflight provider. */
+  readonly formalPreflightMinRisk?: 'medium' | 'high' | 'critical'
+  /** Time budget offered to fast-path preflight providers. */
+  readonly preflightFastPathBudgetMs?: number
+  /** Permit an explicitly marked unverified answer after bounded protocol failure. */
+  readonly allowUnverifiedCompletion?: boolean
+  /** Maximum adaptive stopping-boundary repairs before evaluating degradation. */
+  readonly maxAdaptiveCompletionRepairs?: number
+  /** Frequency of model-authored progress commands. */
+  readonly progressUpdatePolicy?: 'manual' | 'material-only' | 'every-action'
   /** Maximum consecutive stopping-boundary repairs without a new checkpoint revision. */
   readonly maxRepairSteps?: number
   /** Maximum UTF-8 size of the canonical checkpoint and its model-visible rendering. */
@@ -116,6 +149,8 @@ export interface Config {
   readonly maxStagnantRevisions?: number
   /** Maximum failed top-level semantic-protocol calls in one turn before cancellation. */
   readonly maxProtocolFailures?: number
+  /** Maximum UTF-8 size of one command-v2 argument object. */
+  readonly maxCommandBytes?: number
   /** Require a ready checkpoint to cite at least one successful environment-tool result from the current turn. */
   readonly requireToolEvidence?: boolean
   /** Deployment-declared semantic capabilities available to this preset. */
@@ -124,10 +159,20 @@ export interface Config {
 
 /** Loader schema for the experimental semantic loop. */
 export const Config: z<Config> = z.object({
+  protocolMode: z.union(['legacy-v1', 'hybrid', 'command-v2'] as const).default('command-v2'),
+  preActionGate: z.union(['off', 'observe', 'adaptive', 'enforce'] as const).default('adaptive'),
+  unknownActionPolicy: z.union(['observe', 'ask', 'deny'] as const).default('ask'),
+  requireCurrentTurnBegin: z.boolean().default(false),
+  formalPreflightMinRisk: z.union(['medium', 'high', 'critical'] as const).default('high'),
+  preflightFastPathBudgetMs: z.number().step(1).min(1).default(DEFAULT_PREFLIGHT_FAST_PATH_BUDGET_MS),
+  allowUnverifiedCompletion: z.boolean().default(true),
+  maxAdaptiveCompletionRepairs: z.number().step(1).min(0).default(DEFAULT_MAX_ADAPTIVE_COMPLETION_REPAIRS),
+  progressUpdatePolicy: z.union(['manual', 'material-only', 'every-action'] as const).default('material-only'),
   maxRepairSteps: z.number().step(1).min(1).default(DEFAULT_MAX_REPAIR_STEPS),
   maxCheckpointBytes: z.number().step(1).min(1).default(DEFAULT_MAX_CHECKPOINT_BYTES),
   maxStagnantRevisions: z.number().step(1).min(0).default(DEFAULT_MAX_STAGNANT_REVISIONS),
   maxProtocolFailures: z.number().step(1).min(1).default(DEFAULT_MAX_PROTOCOL_FAILURES),
+  maxCommandBytes: z.number().step(1).min(1).default(DEFAULT_MAX_COMMAND_BYTES),
   requireToolEvidence: z.boolean().default(false),
   capabilities: z.array(z.object({
     id: z.string(),
@@ -137,10 +182,20 @@ export const Config: z<Config> = z.object({
 
 /** Fully materialized plugin configuration. */
 interface ResolvedConfig {
+  readonly protocolMode: 'legacy-v1' | 'hybrid' | 'command-v2'
+  readonly preActionGate: 'off' | 'observe' | 'adaptive' | 'enforce'
+  readonly unknownActionPolicy: 'observe' | 'ask' | 'deny'
+  readonly requireCurrentTurnBegin: boolean
+  readonly formalPreflightMinRisk: 'medium' | 'high' | 'critical'
+  readonly preflightFastPathBudgetMs: number
+  readonly allowUnverifiedCompletion: boolean
+  readonly maxAdaptiveCompletionRepairs: number
+  readonly progressUpdatePolicy: 'manual' | 'material-only' | 'every-action'
   readonly maxRepairSteps: number
   readonly maxCheckpointBytes: number
   readonly maxStagnantRevisions: number
   readonly maxProtocolFailures: number
+  readonly maxCommandBytes: number
   readonly requireToolEvidence: boolean
   readonly capabilities: readonly SemanticCapability[]
 }
@@ -160,6 +215,43 @@ interface ProtocolFailureState {
 
 /** Validate config when apply is called without Loader normalization. */
 function resolveConfig(config: Config): ResolvedConfig {
+  const protocolMode = config.protocolMode ?? 'command-v2'
+  if (!(['legacy-v1', 'hybrid', 'command-v2'] as const).includes(protocolMode)) {
+    throw new TypeError('protocolMode must be legacy-v1, hybrid, or command-v2')
+  }
+  const preActionGate = config.preActionGate ?? 'adaptive'
+  if (!(['off', 'observe', 'adaptive', 'enforce'] as const).includes(preActionGate)) {
+    throw new TypeError('preActionGate must be off, observe, adaptive, or enforce')
+  }
+  const unknownActionPolicy = config.unknownActionPolicy ?? 'ask'
+  if (!(['observe', 'ask', 'deny'] as const).includes(unknownActionPolicy)) {
+    throw new TypeError('unknownActionPolicy must be observe, ask, or deny')
+  }
+  const requireCurrentTurnBegin = config.requireCurrentTurnBegin ?? false
+  if (typeof requireCurrentTurnBegin !== 'boolean') {
+    throw new TypeError('requireCurrentTurnBegin must be a boolean')
+  }
+  const formalPreflightMinRisk = config.formalPreflightMinRisk ?? 'high'
+  if (!(['medium', 'high', 'critical'] as const).includes(formalPreflightMinRisk)) {
+    throw new TypeError('formalPreflightMinRisk must be medium, high, or critical')
+  }
+  const preflightFastPathBudgetMs = config.preflightFastPathBudgetMs ?? DEFAULT_PREFLIGHT_FAST_PATH_BUDGET_MS
+  if (!Number.isSafeInteger(preflightFastPathBudgetMs) || preflightFastPathBudgetMs < 1) {
+    throw new TypeError('preflightFastPathBudgetMs must be a positive safe integer')
+  }
+  const allowUnverifiedCompletion = config.allowUnverifiedCompletion ?? true
+  if (typeof allowUnverifiedCompletion !== 'boolean') {
+    throw new TypeError('allowUnverifiedCompletion must be a boolean')
+  }
+  const maxAdaptiveCompletionRepairs = config.maxAdaptiveCompletionRepairs
+    ?? DEFAULT_MAX_ADAPTIVE_COMPLETION_REPAIRS
+  if (!Number.isSafeInteger(maxAdaptiveCompletionRepairs) || maxAdaptiveCompletionRepairs < 0) {
+    throw new TypeError('maxAdaptiveCompletionRepairs must be a non-negative safe integer')
+  }
+  const progressUpdatePolicy = config.progressUpdatePolicy ?? 'material-only'
+  if (!(['manual', 'material-only', 'every-action'] as const).includes(progressUpdatePolicy)) {
+    throw new TypeError('progressUpdatePolicy must be manual, material-only, or every-action')
+  }
   const maxRepairSteps = config.maxRepairSteps ?? DEFAULT_MAX_REPAIR_STEPS
   if (!Number.isSafeInteger(maxRepairSteps) || maxRepairSteps < 1) {
     throw new TypeError('maxRepairSteps must be a positive safe integer')
@@ -176,16 +268,39 @@ function resolveConfig(config: Config): ResolvedConfig {
   if (!Number.isSafeInteger(maxProtocolFailures) || maxProtocolFailures < 1) {
     throw new TypeError('maxProtocolFailures must be a positive safe integer')
   }
+  const maxCommandBytes = config.maxCommandBytes ?? DEFAULT_MAX_COMMAND_BYTES
+  if (!Number.isSafeInteger(maxCommandBytes) || maxCommandBytes < 1) {
+    throw new TypeError('maxCommandBytes must be a positive safe integer')
+  }
   const requireToolEvidence = config.requireToolEvidence ?? false
   if (typeof requireToolEvidence !== 'boolean') {
     throw new TypeError('requireToolEvidence must be a boolean')
   }
   const capabilities = resolveConfiguredCapabilities(config.capabilities ?? [])
+  if (preActionGate === 'enforce' && !requireCurrentTurnBegin) {
+    throw new TypeError('preActionGate enforce requires requireCurrentTurnBegin true')
+  }
+  if (preActionGate === 'enforce' && unknownActionPolicy === 'observe') {
+    throw new TypeError('preActionGate enforce is incompatible with unknownActionPolicy observe')
+  }
+  if (preActionGate === 'enforce' && allowUnverifiedCompletion) {
+    throw new TypeError('preActionGate enforce is incompatible with allowUnverifiedCompletion true')
+  }
   return {
+    protocolMode,
+    preActionGate,
+    unknownActionPolicy,
+    requireCurrentTurnBegin,
+    formalPreflightMinRisk,
+    preflightFastPathBudgetMs,
+    allowUnverifiedCompletion,
+    maxAdaptiveCompletionRepairs,
+    progressUpdatePolicy,
     maxRepairSteps,
     maxCheckpointBytes,
     maxStagnantRevisions,
     maxProtocolFailures,
+    maxCommandBytes,
     requireToolEvidence,
     capabilities,
   }
@@ -302,6 +417,24 @@ Before semantic_finish succeeds, emit tool calls without accompanying ordinary a
  */
 export function apply(ctx: Context, config: Config): void {
   const resolved = resolveConfig(config)
+  if (resolved.protocolMode !== 'legacy-v1') {
+    applyCommandRuntime(ctx, {
+      protocolMode: resolved.protocolMode,
+      preActionGate: resolved.preActionGate,
+      unknownActionPolicy: resolved.unknownActionPolicy,
+      requireCurrentTurnBegin: resolved.requireCurrentTurnBegin,
+      formalPreflightMinRisk: resolved.formalPreflightMinRisk,
+      preflightFastPathBudgetMs: resolved.preflightFastPathBudgetMs,
+      allowUnverifiedCompletion: resolved.allowUnverifiedCompletion,
+      maxAdaptiveCompletionRepairs: resolved.maxAdaptiveCompletionRepairs,
+      maxProtocolFailures: resolved.maxProtocolFailures,
+      maxCommandBytes: resolved.maxCommandBytes,
+      progressUpdatePolicy: resolved.progressUpdatePolicy,
+      requireToolEvidence: resolved.requireToolEvidence,
+      capabilities: resolved.capabilities,
+    })
+    return
+  }
   const repairs = new Map<Agent, RepairState>()
   const protocolFailures = new Map<Agent, ProtocolFailureState>()
 

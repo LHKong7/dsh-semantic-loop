@@ -7,6 +7,16 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 export const PLUGIN = 'dsh-semantic-loop'
 /** Whole-state replacement tool name. */
 export const CHECKPOINT_TOOL = 'semantic_checkpoint'
+/** Incremental protocol initialization tool name. */
+export const BEGIN_TOOL = 'semantic_begin'
+/** Incremental run-state update tool name. */
+export const PROGRESS_TOOL = 'semantic_progress'
+/** Atomic plan replacement tool name. */
+export const REPLAN_TOOL = 'semantic_replan'
+/** Structural ready-state sealing tool name. */
+export const READY_TOOL = 'semantic_ready'
+/** Exact final candidate submission tool name. */
+export const CANDIDATE_TOOL = 'semantic_candidate'
 /** On-demand read tool for the latest complete semantic state. */
 export const STATE_TOOL = 'semantic_state'
 /** Agent-scoped semantic-capability inspection tool name. */
@@ -23,8 +33,10 @@ export const FINISH_TOOL = 'semantic_finish'
  * @returns Whether the call is semantic protocol traffic.
  */
 export function isSemanticToolName(name: string): boolean {
-  return name === CHECKPOINT_TOOL || name === STATE_TOOL || name === CAPABILITIES_TOOL
-    || name === VERIFY_TOOL || name === FINISH_TOOL
+  return name === CHECKPOINT_TOOL || name === BEGIN_TOOL || name === PROGRESS_TOOL
+    || name === REPLAN_TOOL || name === READY_TOOL || name === CANDIDATE_TOOL
+    || name === STATE_TOOL || name === CAPABILITIES_TOOL || name === VERIFY_TOOL
+    || name === FINISH_TOOL
 }
 
 /**

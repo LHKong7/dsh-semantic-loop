@@ -1,0 +1,34 @@
+# Reuse the complete Semantic composition and replace only its control policy.
+- id: semantic-base
+  name: '@deepseek-ai/cordis-plugin-include'
+  config:
+    path: ../semantic/agent.cordis.yml
+    patches:
+      - id: semantic-loop
+        name: 'dsh-semantic-loop'
+        config:
+          protocolMode: command-v2
+          preActionGate: enforce
+          unknownActionPolicy: deny
+          requireCurrentTurnBegin: true
+          formalPreflightMinRisk: medium
+          preflightFastPathBudgetMs: 250
+          allowUnverifiedCompletion: false
+          maxAdaptiveCompletionRepairs: 1
+          progressUpdatePolicy: material-only
+          maxRepairSteps: 3
+          maxStagnantRevisions: 3
+          maxProtocolFailures: 3
+          maxCommandBytes: 8192
+          requireToolEvidence: false
+          capabilities:
+            - id: shell-execution
+              description: Run bounded shell commands through the preset's sandboxed shell tool.
+            - id: filesystem-operations
+              description: Read, inspect, and modify workspace files through filesystem tools.
+            - id: code-search
+              description: Search workspace paths and source text through filesystem search.
+            - id: background-jobs
+              description: Collect and stop background work started by supported tools.
+            - id: skill-discovery
+              description: Discover and load agent skills registered for this preset.
